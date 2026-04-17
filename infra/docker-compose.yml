@@ -3,18 +3,19 @@ services:
     image: postgres:16-alpine
     container_name: dominion-postgres
     environment:
-      POSTGRES_DB: dominion
-      POSTGRES_USER: dominion
-      POSTGRES_PASSWORD: dominion_dev
+      POSTGRES_DB: ${POSTGRES_DB:-dominion}
+      POSTGRES_USER: ${POSTGRES_USER:-dominion}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dominion_dev}
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dominion"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dominion} -d ${POSTGRES_DB:-dominion}"]
       interval: 2s
       timeout: 2s
-      retries: 15
+      retries: 30
+    restart: unless-stopped
 
   mock-oidc:
     image: ghcr.io/navikt/mock-oauth2-server:2.1.10
@@ -24,6 +25,7 @@ services:
       SERVER_PORT: 8090
     ports:
       - "8090:8090"
+    profiles: ["dev"]
 
   openfga:
     image: openfga/openfga:latest
@@ -34,14 +36,36 @@ services:
       OPENFGA_LOG_FORMAT: json
       OPENFGA_PLAYGROUND_ENABLED: "true"
     ports:
-      - "8080:8080"   # HTTP API
-      - "8081:8081"   # gRPC API
-      - "3001:3000"   # Playground (host 3001 so the gateway can keep 3000)
+      - "8080:8080"
+      - "8081:8081"
+      - "3001:3000"
     healthcheck:
       test: ["CMD", "/openfga", "version"]
       interval: 2s
       timeout: 2s
       retries: 15
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ../packages/api-gateway
+      dockerfile: Dockerfile
+    container_name: dominion-gateway
+    environment:
+      DOMINION_GATEWAY_ADDR: ${DOMINION_GATEWAY_ADDR:-:3000}
+      DOMINION_DATABASE_URL: postgres://${POSTGRES_USER:-dominion}:${POSTGRES_PASSWORD:-dominion_dev}@postgres:5432/${POSTGRES_DB:-dominion}?sslmode=disable
+      DOMINION_SESSION_SECRET: ${DOMINION_SESSION_SECRET}
+      DOMINION_OIDC_ISSUER: ${DOMINION_OIDC_ISSUER:-}
+      DOMINION_OIDC_CLIENT_ID: ${DOMINION_OIDC_CLIENT_ID:-}
+      DOMINION_OIDC_CLIENT_SECRET: ${DOMINION_OIDC_CLIENT_SECRET:-}
+      DOMINION_OIDC_REDIRECT_URL: ${DOMINION_OIDC_REDIRECT_URL:-http://localhost:3000/auth/callback}
+      DOMINION_SCIM_TOKEN: ${DOMINION_SCIM_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
 
 volumes:
   postgres-data:
