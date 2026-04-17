@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/acl"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
 )
@@ -41,6 +42,7 @@ type createRequest struct {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	principal, _ := auth.FromContext(r.Context())
+	audit.From(r.Context()).Action = "document.create"
 
 	var req createRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
@@ -77,6 +79,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "failed to create document", nil)
 		return
 	}
+	audit.From(r.Context()).Resource = objectID(doc.ID)
 
 	if h.fga != nil {
 		ownerTuple := acl.Tuple{
@@ -99,6 +102,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	principal, _ := auth.FromContext(r.Context())
+	audit.From(r.Context()).Action = "document.read"
 
 	raw := r.PathValue("id")
 	id, err := uuid.Parse(raw)
@@ -106,6 +110,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_id", "id must be a uuid", nil)
 		return
 	}
+	audit.From(r.Context()).Resource = objectID(id)
 
 	if h.fga != nil {
 		allowed, err := h.fga.Check(r.Context(), principal.ID, acl.RelReader, objectID(id))
@@ -136,6 +141,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	principal, _ := auth.FromContext(r.Context())
+	audit.From(r.Context()).Action = "document.list"
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))

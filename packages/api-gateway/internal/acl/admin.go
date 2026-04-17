@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
 )
 
@@ -73,6 +74,7 @@ func (e validateErr) Error() string { return string(e) }
 func errValidate(s string) error    { return validateErr(s) }
 
 func (h *AdminHandler) grant(w http.ResponseWriter, r *http.Request) {
+	audit.From(r.Context()).Action = "acl.grant"
 	var req grantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
@@ -82,6 +84,8 @@ func (h *AdminHandler) grant(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
+	audit.From(r.Context()).Resource = req.Resource
+	audit.From(r.Context()).OnBehalfOf = req.Principal
 	if err := h.client.Write(r.Context(), Tuple{
 		User:     req.Principal,
 		Relation: req.Relation,
@@ -94,6 +98,7 @@ func (h *AdminHandler) grant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AdminHandler) revoke(w http.ResponseWriter, r *http.Request) {
+	audit.From(r.Context()).Action = "acl.revoke"
 	var req grantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
@@ -103,6 +108,8 @@ func (h *AdminHandler) revoke(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
+	audit.From(r.Context()).Resource = req.Resource
+	audit.From(r.Context()).OnBehalfOf = req.Principal
 	if err := h.client.Delete(r.Context(), Tuple{
 		User:     req.Principal,
 		Relation: req.Relation,

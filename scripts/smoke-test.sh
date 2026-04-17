@@ -172,4 +172,92 @@ if printf '%s' "${bob_list}" | grep -q "\"id\":\"${doc_id}\""; then
 fi
 pass "bob's list excludes alice's document"
 
-log "all smoke tests passed (phases 1, 2, 3)"
+# ------------------------------------------------------------------------
+# 4. Phase 4: signed audit bundle + tamper detection
+# ------------------------------------------------------------------------
+log "4a. generate ~100 traced requests for the audit log"
+# Every /documents read above counts; top up with cheap allowed + denied
+# reads so the bundle comfortably exceeds 100 entries.
+for i in $(seq 1 80); do
+    curl -s -o /dev/null "${bob_h[@]}" "${url}/documents/${doc_id}"
+    curl -s -o /dev/null "${alice_h[@]}" "${url}/documents/${doc_id}"
+done
+pass "generated request volume"
+
+log "4b. export audit bundle"
+from_ts="$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+          || python3 -c 'import datetime as d;print((d.datetime.utcnow()-d.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+export_url="${url}/admin/audit?from=${from_ts}"
+bundle="$(curl -fsS "${admin_hdr[@]}" "${export_url}")"
+count="$(printf '%s' "${bundle}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')"
+[[ "${count}" -ge 100 ]] \
+    && pass "bundle contains ${count} entries (>=100)" \
+    || fail "expected >=100 entries, got ${count}"
+
+log "4c. verify every signature with the published public key"
+printf '%s' "${bundle}" | python3 - <<'PY'
+import json, sys, base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+def canon(ev):
+    ev = {k: v for k, v in ev.items() if k != "signature"}
+    return json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+bundle = json.load(sys.stdin)
+pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(bundle["public_key_base64"]))
+events = bundle["events"]
+bad = 0
+for ev in events:
+    sig = base64.b64decode(ev["signature"])
+    try:
+        pub.verify(sig, canon(ev))
+    except Exception:
+        bad += 1
+print(f"verified_ok={len(events)-bad} verified_fail={bad}")
+sys.exit(0 if bad == 0 else 1)
+PY
+[[ $? -eq 0 ]] \
+    && pass "every audit entry verifies" \
+    || fail "one or more audit entries failed to verify"
+
+log "4d. tamper with one entry — only that entry should fail"
+printf '%s' "${bundle}" | python3 - <<'PY'
+import json, sys, base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+def canon(ev):
+    ev = {k: v for k, v in ev.items() if k != "signature"}
+    return json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+bundle = json.load(sys.stdin)
+pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(bundle["public_key_base64"]))
+events = bundle["events"]
+# Flip the decision of the middle entry.
+target = len(events) // 2
+events[target]["decision"] = "tampered"
+failures = []
+for i, ev in enumerate(events):
+    sig = base64.b64decode(ev["signature"])
+    try:
+        pub.verify(sig, canon(ev))
+    except Exception:
+        failures.append(i)
+if failures == [target]:
+    print(f"tamper_detected_at_index={target} other_failures=0")
+    sys.exit(0)
+else:
+    print(f"unexpected_failures={failures} target={target}")
+    sys.exit(1)
+PY
+[[ $? -eq 0 ]] \
+    && pass "tamper isolated to the one modified entry" \
+    || fail "tamper detection broken — check canonicalisation"
+
+log "4e. ACL deny (phase 3 bob->alice doc) is present in the log"
+denied="$(printf '%s' "${bundle}" \
+    | python3 -c 'import json,sys;b=json.load(sys.stdin);print(sum(1 for e in b["events"] if e["decision"]=="deny" and e["actor"].startswith("user:") and e["resource"]=="document:'"${doc_id}"'"))')"
+[[ "${denied}" -ge 1 ]] \
+    && pass "at least one deny event for the target document is recorded (${denied})" \
+    || fail "no deny events recorded for the test document"
+
+log "all smoke tests passed (phases 1, 2, 3, 4)"

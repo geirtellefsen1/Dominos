@@ -26,6 +26,8 @@ audit middleware lands in phases 2–4.
 | DELETE | `/scim/v2/Users/{id}`   | treated as deactivate |
 | POST   | `/admin/acl/grant`      | bearer `DOMINION_ADMIN_TOKEN`; body `{principal,relation,resource}` |
 | POST   | `/admin/acl/revoke`     | bearer `DOMINION_ADMIN_TOKEN`; body `{principal,relation,resource}` |
+| GET    | `/admin/audit`          | bearer `DOMINION_ADMIN_TOKEN`; query `from`, `to`, `actor`; returns signed bundle + pubkey |
+| GET    | `/admin/audit/key`      | Ed25519 pubkey used to sign the log (for offline verification) |
 
 Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 
@@ -42,6 +44,7 @@ Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 | `DOMINION_OIDC_REDIRECT_URL` | `http://localhost:3000/auth/callback` | |
 | `DOMINION_SCIM_TOKEN`        | unset | Bearer token that SCIM clients must present |
 | `DOMINION_ADMIN_TOKEN`       | unset | Bearer token for `/admin/*` routes (phase 3+) |
+| `DOMINION_AUDIT_PRIVATE_KEY` | random per run | base64 Ed25519 seed (32 bytes) or private key (64 bytes) used to sign audit rows. Set in prod so exports keep verifying across restarts. |
 | `DOMINION_FGA_API_URL`       | unset | e.g. `http://openfga:8080`; when unset ACL is disabled |
 | `DOMINION_FGA_STORE_NAME`    | `dominion` | OpenFGA store to bootstrap |
 | `DOMINION_DEV_PRINCIPAL_HEADER` | `false` | **Dev only.** When `true`, trusts `X-Dominion-Dev-Principal: user:<uuid>` header. |

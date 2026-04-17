@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/acl"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/db"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
@@ -48,6 +49,18 @@ func main() {
 	jwtSecret := loadSessionSecret()
 	users := auth.NewUserStore(pool)
 	sessions := auth.NewSessionStore(pool, jwtSecret)
+
+	// --- audit ---
+	auditKeys, err := audit.LoadKeys()
+	if err != nil {
+		slog.Error("audit keys", "err", err)
+		os.Exit(1)
+	}
+	auditStore := audit.NewStore(pool, auditKeys)
+	if err := auditStore.EnsurePartitions(ctx, 12); err != nil {
+		slog.Error("audit partitions", "err", err)
+		os.Exit(1)
+	}
 
 	// --- ACL (OpenFGA) ---
 	var fgaClient *acl.Client
@@ -104,12 +117,19 @@ func main() {
 	if fgaClient != nil {
 		acl.NewAdminHandler(fgaClient, adminToken).Register(mux)
 	}
+	audit.NewHandler(auditStore, adminToken).Register(mux)
 
 	devHeader := strings.EqualFold(os.Getenv("DOMINION_DEV_PRINCIPAL_HEADER"), "true")
 	if devHeader {
 		slog.Warn("DOMINION_DEV_PRINCIPAL_HEADER=true — X-Dominion-Dev-Principal header is trusted. Never enable in production.")
 	}
-	handler := auth.Attach(sessions, auth.AttachOptions{DevPrincipalHeader: devHeader})(mux)
+	// Middleware order (outer → inner):
+	//   audit  → the tap records every request that reaches the gateway
+	//   attach → reads the session cookie / dev header so audit sees a principal
+	//   mux    → route handlers
+	handler := audit.Middleware(auditStore)(
+		auth.Attach(sessions, auth.AttachOptions{DevPrincipalHeader: devHeader})(mux),
+	)
 
 	srv := &http.Server{
 		Addr:              addr,

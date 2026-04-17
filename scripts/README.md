@@ -11,6 +11,8 @@
 
 - Linux with Docker 24+ and the `docker compose` plugin.
 - `curl`, `python3`, `openssl` on PATH (all in a default Ubuntu/Debian image).
+- `python3-cryptography` for the Phase 4 signature verification step of
+  `smoke-test.sh`. On Debian/Ubuntu: `sudo apt install python3-cryptography`.
 - Repo checked out at `/opt/dominion` (or anywhere — scripts locate themselves).
 
 ## One-shot deploy
