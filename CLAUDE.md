@@ -13,7 +13,7 @@ Work one phase at a time. Do **not** start phase N+1 until phase N's
 acceptance test passes.
 
 - [x] Phase 0 — Repo bootstrap
-- [ ] Phase 1 — Document store + schema registry
+- [x] Phase 1 — Document store + schema registry (pending live DB validation)
 - [ ] Phase 2 — Identity + OIDC login
 - [ ] Phase 3 — ACL engine (OpenFGA)
 - [ ] Phase 4 — Audit log (signed, append-only)

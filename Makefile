@@ -1,4 +1,4 @@
-.PHONY: up down gateway dev logs ps health
+.PHONY: up down gateway dev logs ps health test
 
 COMPOSE := docker compose -f infra/docker-compose.yml
 
@@ -21,3 +21,6 @@ dev: up gateway
 
 health:
 	curl -sf http://localhost:3000/health && echo
+
+test:
+	cd packages/api-gateway && go test ./...

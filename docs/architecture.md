@@ -17,8 +17,8 @@ is the short in-repo reference.
 
 | # | Name | Acceptance test | Status |
 | - | ---- | --------------- | ------ |
-| 0 | Repo bootstrap | `docker compose up` + gateway `/health` | **in progress** |
-| 1 | Document store + schema registry | create/read doc, reject malformed | pending |
+| 0 | Repo bootstrap | `docker compose up` + gateway `/health` | complete |
+| 1 | Document store + schema registry | create/read doc, reject malformed | **in progress** |
 | 2 | Identity + OIDC login | login, `/me`, SCIM deactivate kills sessions | pending |
 | 3 | ACL engine | grant/deny works, audit records both | pending |
 | 4 | Audit log | signed bundle export, tamper detected | pending |
