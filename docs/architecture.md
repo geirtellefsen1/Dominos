@@ -19,8 +19,8 @@ is the short in-repo reference.
 | - | ---- | --------------- | ------ |
 | 0 | Repo bootstrap | `docker compose up` + gateway `/health` | complete |
 | 1 | Document store + schema registry | create/read doc, reject malformed | complete |
-| 2 | Identity + OIDC login | login, `/me`, SCIM deactivate kills sessions | **in progress** |
-| 3 | ACL engine | grant/deny works, audit records both | pending |
+| 2 | Identity + OIDC login | login, `/me`, SCIM deactivate kills sessions | complete |
+| 3 | ACL engine | grant/deny works, audit records both | **in progress** (ACL done; audit lands in phase 4) |
 | 4 | Audit log | signed bundle export, tamper detected | pending |
 | 5 | AI identity + OpenClaw fork | mTLS agent, gateway-routed tools | pending |
 | 6 | Email ingestion | new mail → `email.v1` doc < 90s | pending |

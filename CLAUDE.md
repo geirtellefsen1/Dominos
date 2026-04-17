@@ -15,7 +15,7 @@ acceptance test passes.
 - [x] Phase 0 — Repo bootstrap
 - [x] Phase 1 — Document store + schema registry (pending live DB validation)
 - [x] Phase 2 — Identity + OIDC login (pending live IdP + DB validation)
-- [ ] Phase 3 — ACL engine (OpenFGA)
+- [x] Phase 3 — ACL engine (OpenFGA) (audit integration deferred to phase 4)
 - [ ] Phase 4 — Audit log (signed, append-only)
 - [ ] Phase 5 — AI identity + OpenClaw fork wired in
 - [ ] Phase 6 — Email ingestion (Microsoft Graph)

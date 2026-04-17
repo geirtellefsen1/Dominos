@@ -87,8 +87,12 @@ func (s *Store) Get(ctx context.Context, id uuid.UUID) (*Document, error) {
 
 type ListParams struct {
 	SchemaID string
-	Limit    int
-	Offset   int
+	// IDs, when non-nil, restricts results to this set (empty slice → no
+	// results). The ACL-aware list path uses this to pass the set of
+	// documents the caller can read.
+	IDs    []uuid.UUID
+	Limit  int
+	Offset int
 }
 
 func (s *Store) List(ctx context.Context, p ListParams) ([]*Document, error) {
@@ -98,15 +102,19 @@ func (s *Store) List(ctx context.Context, p ListParams) ([]*Document, error) {
 	if p.Offset < 0 {
 		p.Offset = 0
 	}
+	if p.IDs != nil && len(p.IDs) == 0 {
+		return nil, nil
+	}
 	const q = `
         SELECT id, schema_id, tenant_id, body, created_at, created_by, updated_at, updated_by, deleted_at
         FROM documents
         WHERE deleted_at IS NULL
           AND ($1 = '' OR schema_id = $1)
+          AND ($4::uuid[] IS NULL OR id = ANY($4))
         ORDER BY created_at DESC
         LIMIT $2 OFFSET $3
     `
-	rows, err := s.pool.Query(ctx, q, p.SchemaID, p.Limit, p.Offset)
+	rows, err := s.pool.Query(ctx, q, p.SchemaID, p.Limit, p.Offset, p.IDs)
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
 	}

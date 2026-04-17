@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/acl"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/db"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
@@ -47,10 +49,24 @@ func main() {
 	users := auth.NewUserStore(pool)
 	sessions := auth.NewSessionStore(pool, jwtSecret)
 
+	// --- ACL (OpenFGA) ---
+	var fgaClient *acl.Client
+	if url := os.Getenv("DOMINION_FGA_API_URL"); url != "" {
+		fgaClient = acl.NewClient(url)
+		bootstrapCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := acl.Bootstrap(bootstrapCtx, fgaClient, envOr("DOMINION_FGA_STORE_NAME", "dominion")); err != nil {
+			cancel()
+			slog.Error("fga bootstrap", "err", err)
+			os.Exit(1)
+		}
+		cancel()
+	} else {
+		slog.Warn("DOMINION_FGA_API_URL not set; running without ACL enforcement (dev only)")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 
-	// OIDC (optional in dev; log a warning if unconfigured)
 	if issuer := os.Getenv("DOMINION_OIDC_ISSUER"); issuer != "" {
 		oidcClient, err := auth.NewOIDC(ctx, auth.OIDCConfig{
 			IssuerURL:    issuer,
@@ -67,27 +83,33 @@ func main() {
 		slog.Warn("DOMINION_OIDC_ISSUER not set; /auth/login disabled until configured")
 	}
 
-	// Document store (phase 1). Uses attached principal if available.
 	docStore := documents.NewStore(pool)
 	validator := documents.NewValidator(docStore)
-	docHandler := documents.NewHandler(docStore, validator)
+	docHandler := documents.NewHandler(docStore, validator, fgaClient)
 	docHandler.Register(mux)
 
-	// /me (phase 2) — requires auth.
 	mux.Handle("GET /me", auth.Require(auth.MeHandler(users)))
 
-	// SCIM (phase 2). Disabled if no bearer token is configured.
 	scimStore := scim.NewStore(pool)
 	scimToken := os.Getenv("DOMINION_SCIM_TOKEN")
 	if scimToken == "" {
 		slog.Warn("DOMINION_SCIM_TOKEN not set; SCIM endpoints will reject all requests")
 	}
-	scimHandler := scim.NewHandler(scimStore, sessions, scimToken)
-	scimHandler.Register(mux)
+	scim.NewHandler(scimStore, sessions, scimToken).Register(mux)
 
-	// Wrap everything in the auth.Attach middleware so any route can read a
-	// Principal from context.
-	handler := auth.Attach(sessions)(mux)
+	adminToken := os.Getenv("DOMINION_ADMIN_TOKEN")
+	if adminToken == "" {
+		slog.Warn("DOMINION_ADMIN_TOKEN not set; /admin/* endpoints will reject all requests")
+	}
+	if fgaClient != nil {
+		acl.NewAdminHandler(fgaClient, adminToken).Register(mux)
+	}
+
+	devHeader := strings.EqualFold(os.Getenv("DOMINION_DEV_PRINCIPAL_HEADER"), "true")
+	if devHeader {
+		slog.Warn("DOMINION_DEV_PRINCIPAL_HEADER=true — X-Dominion-Dev-Principal header is trusted. Never enable in production.")
+	}
+	handler := auth.Attach(sessions, auth.AttachOptions{DevPrincipalHeader: devHeader})(mux)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -122,8 +144,6 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// loadSessionSecret reads DOMINION_SESSION_SECRET or generates an ephemeral
-// one with a loud warning (sessions won't survive a restart).
 func loadSessionSecret() []byte {
 	if s := os.Getenv("DOMINION_SESSION_SECRET"); s != "" {
 		return []byte(s)

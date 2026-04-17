@@ -28,7 +28,7 @@ services:
     profiles: ["dev"]
 
   openfga:
-    image: openfga/openfga:latest
+    image: openfga/openfga:v1.9.5
     container_name: dominion-openfga
     command: run
     environment:
@@ -40,10 +40,10 @@ services:
       - "8081:8081"
       - "3001:3000"
     healthcheck:
-      test: ["CMD", "/openfga", "version"]
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=localhost:8081"]
       interval: 2s
       timeout: 2s
-      retries: 15
+      retries: 30
     restart: unless-stopped
 
   gateway:
@@ -60,8 +60,14 @@ services:
       DOMINION_OIDC_CLIENT_SECRET: ${DOMINION_OIDC_CLIENT_SECRET:-}
       DOMINION_OIDC_REDIRECT_URL: ${DOMINION_OIDC_REDIRECT_URL:-http://localhost:3000/auth/callback}
       DOMINION_SCIM_TOKEN: ${DOMINION_SCIM_TOKEN:-}
+      DOMINION_FGA_API_URL: ${DOMINION_FGA_API_URL:-http://openfga:8080}
+      DOMINION_FGA_STORE_NAME: ${DOMINION_FGA_STORE_NAME:-dominion}
+      DOMINION_ADMIN_TOKEN: ${DOMINION_ADMIN_TOKEN:-}
+      DOMINION_DEV_PRINCIPAL_HEADER: ${DOMINION_DEV_PRINCIPAL_HEADER:-false}
     depends_on:
       postgres:
+        condition: service_healthy
+      openfga:
         condition: service_healthy
     ports:
       - "3000:3000"

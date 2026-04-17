@@ -86,6 +86,7 @@ PY
 }
 ensure_secret DOMINION_SESSION_SECRET 32
 ensure_secret DOMINION_SCIM_TOKEN 24
+ensure_secret DOMINION_ADMIN_TOKEN 24
 ensure_secret POSTGRES_PASSWORD 18
 
 chmod 600 "${env_file}"
