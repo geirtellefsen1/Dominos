@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -11,8 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/db"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/scim"
 )
 
 func main() {
@@ -38,17 +42,56 @@ func main() {
 		os.Exit(1)
 	}
 
-	docStore := documents.NewStore(pool)
-	validator := documents.NewValidator(docStore)
-	docHandler := documents.NewHandler(docStore, validator)
+	// --- auth / identity ---
+	jwtSecret := loadSessionSecret()
+	users := auth.NewUserStore(pool)
+	sessions := auth.NewSessionStore(pool, jwtSecret)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
+
+	// OIDC (optional in dev; log a warning if unconfigured)
+	if issuer := os.Getenv("DOMINION_OIDC_ISSUER"); issuer != "" {
+		oidcClient, err := auth.NewOIDC(ctx, auth.OIDCConfig{
+			IssuerURL:    issuer,
+			ClientID:     os.Getenv("DOMINION_OIDC_CLIENT_ID"),
+			ClientSecret: os.Getenv("DOMINION_OIDC_CLIENT_SECRET"),
+			RedirectURL:  envOr("DOMINION_OIDC_REDIRECT_URL", "http://localhost:3000/auth/callback"),
+		}, users, sessions)
+		if err != nil {
+			slog.Error("oidc init", "err", err)
+			os.Exit(1)
+		}
+		oidcClient.Register(mux)
+	} else {
+		slog.Warn("DOMINION_OIDC_ISSUER not set; /auth/login disabled until configured")
+	}
+
+	// Document store (phase 1). Uses attached principal if available.
+	docStore := documents.NewStore(pool)
+	validator := documents.NewValidator(docStore)
+	docHandler := documents.NewHandler(docStore, validator)
 	docHandler.Register(mux)
+
+	// /me (phase 2) — requires auth.
+	mux.Handle("GET /me", auth.Require(auth.MeHandler(users)))
+
+	// SCIM (phase 2). Disabled if no bearer token is configured.
+	scimStore := scim.NewStore(pool)
+	scimToken := os.Getenv("DOMINION_SCIM_TOKEN")
+	if scimToken == "" {
+		slog.Warn("DOMINION_SCIM_TOKEN not set; SCIM endpoints will reject all requests")
+	}
+	scimHandler := scim.NewHandler(scimStore, sessions, scimToken)
+	scimHandler.Register(mux)
+
+	// Wrap everything in the auth.Attach middleware so any route can read a
+	// Principal from context.
+	handler := auth.Attach(sessions)(mux)
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -77,4 +120,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// loadSessionSecret reads DOMINION_SESSION_SECRET or generates an ephemeral
+// one with a loud warning (sessions won't survive a restart).
+func loadSessionSecret() []byte {
+	if s := os.Getenv("DOMINION_SESSION_SECRET"); s != "" {
+		return []byte(s)
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		panic("cannot generate session secret: " + err.Error())
+	}
+	slog.Warn("DOMINION_SESSION_SECRET not set; generated ephemeral secret (sessions will not survive restart)",
+		"secret_preview", base64.RawURLEncoding.EncodeToString(buf[:4])+"...")
+	return buf
 }

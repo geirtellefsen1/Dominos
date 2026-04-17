@@ -18,8 +18,8 @@ is the short in-repo reference.
 | # | Name | Acceptance test | Status |
 | - | ---- | --------------- | ------ |
 | 0 | Repo bootstrap | `docker compose up` + gateway `/health` | complete |
-| 1 | Document store + schema registry | create/read doc, reject malformed | **in progress** |
-| 2 | Identity + OIDC login | login, `/me`, SCIM deactivate kills sessions | pending |
+| 1 | Document store + schema registry | create/read doc, reject malformed | complete |
+| 2 | Identity + OIDC login | login, `/me`, SCIM deactivate kills sessions | **in progress** |
 | 3 | ACL engine | grant/deny works, audit records both | pending |
 | 4 | Audit log | signed bundle export, tamper detected | pending |
 | 5 | AI identity + OpenClaw fork | mTLS agent, gateway-routed tools | pending |

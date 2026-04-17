@@ -16,6 +16,15 @@ services:
       timeout: 2s
       retries: 15
 
+  mock-oidc:
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    container_name: dominion-mock-oidc
+    environment:
+      LOG_LEVEL: INFO
+      SERVER_PORT: 8090
+    ports:
+      - "8090:8090"
+
   openfga:
     image: openfga/openfga:latest
     container_name: dominion-openfga
