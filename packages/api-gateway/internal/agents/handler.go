@@ -1,0 +1,128 @@
+package agents
+
+import (
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/ca"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
+)
+
+type Handler struct {
+	store *Store
+	ca    *ca.CA
+	token string
+}
+
+func NewHandler(store *Store, ca *ca.CA, token string) *Handler {
+	return &Handler{store: store, ca: ca, token: token}
+}
+
+func (h *Handler) Register(mux *http.ServeMux) {
+	mux.Handle("POST /admin/agents", h.auth(http.HandlerFunc(h.create)))
+	mux.Handle("DELETE /admin/agents/{id}", h.auth(http.HandlerFunc(h.revoke)))
+	// The CA cert is public by design — anyone needs it to verify the
+	// gateway's TLS cert and agent certs. Unauthenticated.
+	mux.HandleFunc("GET /admin/ca/cert", h.caCert)
+}
+
+func (h *Handler) auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.token == "" {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "admin_disabled",
+				"DOMINION_ADMIN_TOKEN not configured", nil)
+			return
+		}
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
+			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid admin bearer token", nil)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type createRequest struct {
+	DisplayName string     `json:"display_name"`
+	OwnerUserID *uuid.UUID `json:"owner_user_id,omitempty"`
+}
+
+type createResponse struct {
+	Agent          *Agent `json:"agent"`
+	CertPEM        string `json:"cert_pem"`
+	PrivateKeyPEM  string `json:"private_key_pem"`
+	CACertPEM      string `json:"ca_cert_pem"`
+}
+
+func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+	// Audit action/resource left at defaults — the audit middleware
+	// still records every call; importing the audit package here would
+	// create a cycle (audit→auth→agents→audit).
+	var req createRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
+		return
+	}
+	if strings.TrimSpace(req.DisplayName) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_request", "display_name is required", nil)
+		return
+	}
+
+	id := uuid.New()
+	issued, err := h.ca.IssueAgent(id, req.DisplayName)
+	if err != nil {
+		slog.Error("issue agent cert", "err", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "ca_issue_failed", err.Error(), nil)
+		return
+	}
+
+	stored, err := h.store.Insert(r.Context(), &Agent{
+		ID:          id,
+		DisplayName: req.DisplayName,
+		Thumbprint:  issued.Thumbprint,
+		OwnerUserID: req.OwnerUserID,
+	}, string(issued.CertPEM))
+	if err != nil {
+		slog.Error("insert agent", "err", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusCreated, createResponse{
+		Agent:         stored,
+		CertPEM:       string(issued.CertPEM),
+		PrivateKeyPEM: string(issued.KeyPEM),
+		CACertPEM:     string(h.ca.CertPEM),
+	})
+}
+
+func (h *Handler) revoke(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid_id", "id must be a uuid", nil)
+		return
+	}
+
+	a, err := h.store.Revoke(r.Context(), id)
+	if errors.Is(err, ErrNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, a)
+}
+
+func (h *Handler) caCert(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(h.ca.CertPEM)
+}

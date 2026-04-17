@@ -13,6 +13,10 @@
 - `curl`, `python3`, `openssl` on PATH (all in a default Ubuntu/Debian image).
 - `python3-cryptography` for the Phase 4 signature verification step of
   `smoke-test.sh`. On Debian/Ubuntu: `sudo apt install -y python3-cryptography`.
+- Either `golang-go` **or** a pre-built `dominion-agent-cli` docker image
+  for the Phase 5 agent tests. On Debian/Ubuntu:
+  `sudo apt install -y golang-go`. Docker alternative:
+  `docker build -t dominion-agent-cli packages/agent-runtime`.
 
 ## Re-deploying after env changes
 

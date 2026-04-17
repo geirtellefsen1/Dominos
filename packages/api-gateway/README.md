@@ -28,6 +28,9 @@ audit middleware lands in phases 2–4.
 | POST   | `/admin/acl/revoke`     | bearer `DOMINION_ADMIN_TOKEN`; body `{principal,relation,resource}` |
 | GET    | `/admin/audit`          | bearer `DOMINION_ADMIN_TOKEN`; query `from`, `to`, `actor`; returns signed bundle + pubkey |
 | GET    | `/admin/audit/key`      | Ed25519 pubkey used to sign the log (for offline verification) |
+| POST   | `/admin/agents`         | bearer token; body `{display_name, owner_user_id?}`; returns cert + key PEM (once) |
+| DELETE | `/admin/agents/{id}`    | bearer token; revokes an agent identity |
+| GET    | `/admin/ca/cert`        | unauthenticated; returns Dominion CA cert PEM so callers can verify the TLS listener |
 
 Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 
@@ -45,6 +48,11 @@ Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 | `DOMINION_SCIM_TOKEN`        | unset | Bearer token that SCIM clients must present |
 | `DOMINION_ADMIN_TOKEN`       | unset | Bearer token for `/admin/*` routes (phase 3+) |
 | `DOMINION_AUDIT_PRIVATE_KEY` | random per run | base64 Ed25519 seed (32 bytes) or private key (64 bytes) used to sign audit rows. Set in prod so exports keep verifying across restarts. |
+| `DOMINION_TLS_ENABLED`       | `false` | When `true`, also listen on `:3443` with mTLS; accepts agent client certs. |
+| `DOMINION_GATEWAY_TLS_ADDR`  | `:3443` | TLS bind address. |
+| `DOMINION_TLS_HOSTNAMES`     | unset | Comma-separated extra DNS names for the auto-issued server cert. |
+| `DOMINION_TLS_IPS`           | unset | Comma-separated extra IPs for the auto-issued server cert (e.g. droplet public IP). |
+| `DOMINION_CA_CERT_PEM` / `DOMINION_CA_KEY_PEM` | unset | Persistent Ed25519 CA. When blank, a fresh CA is generated on boot (agents issued before a restart stop authenticating). |
 | `DOMINION_FGA_API_URL`       | unset | e.g. `http://openfga:8080`; when unset ACL is disabled |
 | `DOMINION_FGA_STORE_NAME`    | `dominion` | OpenFGA store to bootstrap |
 | `DOMINION_DEV_PRINCIPAL_HEADER` | `false` | **Dev only.** When `true`, trusts `X-Dominion-Dev-Principal: user:<uuid>` header. |

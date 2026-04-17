@@ -65,6 +65,11 @@ services:
       DOMINION_ADMIN_TOKEN: ${DOMINION_ADMIN_TOKEN:-}
       DOMINION_AUDIT_PRIVATE_KEY: ${DOMINION_AUDIT_PRIVATE_KEY:-}
       DOMINION_DEV_PRINCIPAL_HEADER: ${DOMINION_DEV_PRINCIPAL_HEADER:-false}
+      DOMINION_TLS_ENABLED: ${DOMINION_TLS_ENABLED:-true}
+      DOMINION_TLS_HOSTNAMES: ${DOMINION_TLS_HOSTNAMES:-}
+      DOMINION_TLS_IPS: ${DOMINION_TLS_IPS:-}
+      DOMINION_CA_CERT_PEM: ${DOMINION_CA_CERT_PEM:-}
+      DOMINION_CA_KEY_PEM: ${DOMINION_CA_KEY_PEM:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -72,6 +77,7 @@ services:
         condition: service_healthy
     ports:
       - "3000:3000"
+      - "3443:3443"
     restart: unless-stopped
 
 volumes:

@@ -260,4 +260,120 @@ denied="$(printf '%s' "${bundle}" \
     && pass "at least one deny event for the target document is recorded (${denied})" \
     || fail "no deny events recorded for the test document"
 
-log "all smoke tests passed (phases 1, 2, 3, 4)"
+# ------------------------------------------------------------------------
+# 5. Phase 5: AI identity + mTLS agent
+# ------------------------------------------------------------------------
+tls_enabled="$(grep -E '^DOMINION_TLS_ENABLED=' "${env_file}" | cut -d= -f2- || true)"
+if [[ "${tls_enabled}" != "true" && "${tls_enabled}" != "True" ]]; then
+    log "Phase 5 skipped — DOMINION_TLS_ENABLED not true"
+    log "all smoke tests passed (phases 1, 2, 3, 4)"
+    exit 0
+fi
+
+tls_url="${DOMINION_TLS_URL:-https://127.0.0.1:3443}"
+
+log "5a. POST /admin/agents (create Astrid)"
+agent_resp="$(curl -fsS -X POST "${admin_hdr[@]}" \
+    -d '{"display_name":"Astrid","owner_user_id":"'"${alice_id}"'"}' \
+    "${url}/admin/agents")"
+agent_id="$(printf '%s' "${agent_resp}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["agent"]["id"])')"
+thumbprint="$(printf '%s' "${agent_resp}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["agent"]["thumbprint"])')"
+[[ -n "${agent_id}" && -n "${thumbprint}" ]] || fail "agent creation returned no id/thumbprint"
+pass "agent ${agent_id} created (thumbprint ${thumbprint:0:16}...)"
+
+agent_dir="/tmp/dominion-agent-${agent_id}"
+mkdir -p "${agent_dir}"
+printf '%s' "${agent_resp}" | python3 -c 'import json,sys,os;r=json.load(sys.stdin);d=os.environ["D"];
+open(f"{d}/cert.pem","w").write(r["cert_pem"]);
+open(f"{d}/key.pem","w").write(r["private_key_pem"]);
+open(f"{d}/ca.pem","w").write(r["ca_cert_pem"]);' D="${agent_dir}"
+chmod 600 "${agent_dir}/key.pem"
+
+log "5b. build or fetch agent CLI"
+if command -v go >/dev/null 2>&1; then
+    (cd packages/agent-runtime && go build -o /tmp/dominion-agent-cli ./cmd/agent) \
+        && pass "agent binary built via local go toolchain"
+elif docker image inspect dominion-agent-cli >/dev/null 2>&1 \
+     || docker build -q -t dominion-agent-cli packages/agent-runtime >/dev/null 2>&1; then
+    # Fallback: run the agent from a container. Wrap docker run in a
+    # shim script so the rest of the test treats it like a local binary.
+    cat >/tmp/dominion-agent-cli <<SHIM
+#!/usr/bin/env bash
+exec docker run --rm --network host \
+    -v "${agent_dir}:/secrets:ro" \
+    dominion-agent-cli "\$@"
+SHIM
+    chmod +x /tmp/dominion-agent-cli
+    # Rewrite paths so they refer to /secrets inside the container.
+    agent_dir_hostpath="${agent_dir}"
+    agent_cli=( /tmp/dominion-agent-cli
+        --cert "/secrets/cert.pem"
+        --key  "/secrets/key.pem"
+        --ca   "/secrets/ca.pem"
+        --gateway "${tls_url}" )
+    pass "agent CLI available via docker image dominion-agent-cli"
+else
+    fail "Phase 5 needs either \`go\` on PATH or a buildable docker image. Install golang or run: docker build -t dominion-agent-cli packages/agent-runtime"
+fi
+
+agent_cli=( /tmp/dominion-agent-cli
+    --cert "${agent_dir}/cert.pem"
+    --key  "${agent_dir}/key.pem"
+    --ca   "${agent_dir}/ca.pem"
+    --gateway "${tls_url}" )
+
+log "5c. agent reads alice's doc WITHOUT grant -> expect 403"
+set +e
+out="$("${agent_cli[@]}" read "${doc_id}" 2>&1)"
+rc=$?
+set -e
+printf '%s\n' "${out}" | head -5
+[[ "${rc}" -ne 0 ]] && printf '%s' "${out}" | grep -q 'HTTP 403' \
+    && pass "agent forbidden before grant" \
+    || fail "expected 403, got rc=${rc}"
+
+log "5d. admin grants agent reader on alice's doc"
+grant_body='{
+  "principal":"agent:'"${agent_id}"'",
+  "relation":"reader",
+  "resource":"document:'"${doc_id}"'"
+}'
+curl -fsS -X POST "${admin_hdr[@]}" -d "${grant_body}" "${url}/admin/acl/grant" >/dev/null \
+    && pass "grant to agent accepted" \
+    || fail "grant to agent failed"
+
+log "5e. agent reads the doc -> expect 200"
+out="$("${agent_cli[@]}" read "${doc_id}")"
+printf '%s\n' "${out}" | head -5
+printf '%s' "${out}" | grep -q "\"id\":\"${doc_id}\"" \
+    && pass "agent can read after grant" \
+    || fail "agent still cannot read after grant"
+
+log "5f. agent writes a draft.v1 document"
+draft_body="${agent_dir}/draft.json"
+cat >"${draft_body}" <<EOF
+{
+  "inReplyToDocumentId":"${doc_id}",
+  "to":["bob@example.com"],
+  "subject":"Re: smoke-test",
+  "body":"Astrid's draft reply",
+  "generatedByAgent":"agent:${agent_id}",
+  "generatedAt":"2026-04-17T12:05:00Z",
+  "status":"pending"
+}
+EOF
+out="$("${agent_cli[@]}" write draft.v1 "${draft_body}")"
+printf '%s\n' "${out}" | head -3
+printf '%s' "${out}" | grep -q '"schema_id":"draft.v1"' \
+    && pass "agent wrote draft.v1 document" \
+    || fail "agent draft write failed"
+
+log "5g. audit bundle contains agent actions"
+bundle="$(curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}")"
+agent_events="$(printf '%s' "${bundle}" | python3 -c \
+    'import json,sys;b=json.load(sys.stdin);print(sum(1 for e in b["events"] if e["actor"]=="agent:'"${agent_id}"'"))')"
+[[ "${agent_events}" -ge 3 ]] \
+    && pass "audit log contains ${agent_events} events for agent:${agent_id}" \
+    || fail "expected >=3 agent events, got ${agent_events}"
+
+log "all smoke tests passed (phases 1, 2, 3, 4, 5)"

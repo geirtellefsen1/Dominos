@@ -17,7 +17,7 @@ acceptance test passes.
 - [x] Phase 2 — Identity + OIDC login (pending live IdP + DB validation)
 - [x] Phase 3 — ACL engine (OpenFGA)
 - [x] Phase 4 — Audit log (signed, append-only)
-- [ ] Phase 5 — AI identity + OpenClaw fork wired in
+- [x] Phase 5 — AI identity + minimal agent CLI (OpenClaw fork deferred)
 - [ ] Phase 6 — Email ingestion (Microsoft Graph)
 - [ ] Phase 7 — Hero flow: Astrid triages + approval queue
 - [ ] Phase 8 — Offboarding primitive (one-revoke)

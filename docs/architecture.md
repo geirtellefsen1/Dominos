@@ -21,8 +21,8 @@ is the short in-repo reference.
 | 1 | Document store + schema registry | create/read doc, reject malformed | complete |
 | 2 | Identity + OIDC login | login, `/me`, SCIM deactivate kills sessions | complete |
 | 3 | ACL engine | grant/deny works, audit records both | complete |
-| 4 | Audit log | signed bundle export, tamper detected | **in progress** |
-| 5 | AI identity + OpenClaw fork | mTLS agent, gateway-routed tools | pending |
+| 4 | Audit log | signed bundle export, tamper detected | complete |
+| 5 | AI identity + OpenClaw fork | mTLS agent, gateway-routed tools | **in progress** (governance spine complete; OpenClaw surgery deferred) |
 | 6 | Email ingestion | new mail → `email.v1` doc < 90s | pending |
 | 7 | Hero flow (Astrid + approval queue) | end-to-end §4 runs | pending |
 | 8 | Offboarding primitive | one DELETE revokes everywhere | pending |

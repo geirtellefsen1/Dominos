@@ -7,39 +7,65 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/agents"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/ca"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
 )
 
-// AttachOptions controls how the Attach middleware resolves a Principal.
+// AttachOptions controls how Attach resolves a Principal.
 type AttachOptions struct {
-	// DevPrincipalHeader enables the X-Dominion-Dev-Principal shim. When
-	// true, a request with no session cookie but a header value of the
-	// form `user:<uuid>` is accepted as that user. Must be false in prod.
+	// DevPrincipalHeader enables the X-Dominion-Dev-Principal shim.
 	DevPrincipalHeader bool
+	// Agents, when set, is consulted whenever the request presents a
+	// client certificate. When nil, mTLS principals are not resolved
+	// (phase 2-only deployments).
+	Agents *agents.Store
 }
 
-// Attach reads the session cookie (if present) and stores a Principal on
-// the request context. It never rejects; routes needing auth wrap with
-// Require.
+// Attach attaches a Principal to the request context when one can be
+// resolved. Priority:
+//  1. valid session cookie (human, phase 2)
+//  2. valid client cert signed by the Dominion CA (agent, phase 5)
+//  3. dev principal header (opt-in shim)
+// It never rejects; routes needing auth wrap with Require.
 func Attach(sessions *SessionStore, opts AttachOptions) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// 1. Session cookie.
 			if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
 				if info, err := sessions.Verify(r.Context(), c.Value); err == nil {
-					p := Principal{
+					next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), Principal{
 						Kind:  "user",
 						ID:    "user:" + info.UserID.String(),
 						Email: info.Email,
-					}
-					next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
+					})))
 					return
 				} else {
 					slog.Debug("session verify failed", "err", err)
 				}
 			}
 
-			// 2. Dev-mode header (opt-in).
+			// 2. Client certificate (agent principal).
+			if opts.Agents != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+				cert := r.TLS.PeerCertificates[0]
+				tp := ca.Thumbprint(cert.Raw)
+				agent, err := opts.Agents.GetByThumbprint(r.Context(), tp)
+				if err == nil && agent.Active {
+					next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), Principal{
+						Kind: "agent",
+						ID:   "agent:" + agent.ID.String(),
+					})))
+					return
+				}
+				if err == nil && !agent.Active {
+					httpx.WriteError(w, http.StatusUnauthorized, "agent_revoked",
+						"client certificate has been revoked", nil)
+					return
+				}
+				slog.Debug("client cert not recognised", "thumbprint", tp, "err", err)
+			}
+
+			// 3. Dev-mode header (opt-in).
 			if opts.DevPrincipalHeader {
 				if hv := r.Header.Get("X-Dominion-Dev-Principal"); hv != "" {
 					if p, ok := parseDevPrincipal(hv); ok {
@@ -64,8 +90,7 @@ func Require(next http.Handler) http.Handler {
 	})
 }
 
-// parseDevPrincipal accepts `user:<uuid>` or `agent:<uuid>` (phase 5).
-// Anything else is rejected so the header can't be used to spoof admins.
+// parseDevPrincipal accepts `user:<uuid>` or `agent:<uuid>`.
 func parseDevPrincipal(v string) (Principal, bool) {
 	parts := strings.SplitN(v, ":", 2)
 	if len(parts) != 2 {

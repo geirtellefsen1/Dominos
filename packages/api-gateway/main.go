@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,8 +19,10 @@ import (
 	"time"
 
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/acl"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/agents"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/ca"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/db"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/scim"
@@ -27,6 +33,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	addr := envOr("DOMINION_GATEWAY_ADDR", ":3000")
+	tlsAddr := envOr("DOMINION_GATEWAY_TLS_ADDR", ":3443")
 	dsn := envOr("DOMINION_DATABASE_URL",
 		"postgres://dominion:dominion_dev@localhost:5432/dominion?sslmode=disable")
 
@@ -61,6 +68,14 @@ func main() {
 		slog.Error("audit partitions", "err", err)
 		os.Exit(1)
 	}
+
+	// --- CA + agents (phase 5) ---
+	authority, err := ca.Load()
+	if err != nil {
+		slog.Error("ca load", "err", err)
+		os.Exit(1)
+	}
+	agentStore := agents.NewStore(pool)
 
 	// --- ACL (OpenFGA) ---
 	var fgaClient *acl.Client
@@ -98,8 +113,7 @@ func main() {
 
 	docStore := documents.NewStore(pool)
 	validator := documents.NewValidator(docStore)
-	docHandler := documents.NewHandler(docStore, validator, fgaClient)
-	docHandler.Register(mux)
+	documents.NewHandler(docStore, validator, fgaClient).Register(mux)
 
 	mux.Handle("GET /me", auth.Require(auth.MeHandler(users)))
 
@@ -118,6 +132,7 @@ func main() {
 		acl.NewAdminHandler(fgaClient, adminToken).Register(mux)
 	}
 	audit.NewHandler(auditStore, adminToken).Register(mux)
+	agents.NewHandler(agentStore, authority, adminToken).Register(mux)
 
 	devHeader := strings.EqualFold(os.Getenv("DOMINION_DEV_PRINCIPAL_HEADER"), "true")
 	if devHeader {
@@ -125,31 +140,104 @@ func main() {
 	}
 	// Middleware order (outer → inner):
 	//   audit  → the tap records every request that reaches the gateway
-	//   attach → reads the session cookie / dev header so audit sees a principal
+	//   attach → resolves Principal from cookie / client cert / dev header
 	//   mux    → route handlers
 	handler := audit.Middleware(auditStore)(
-		auth.Attach(sessions, auth.AttachOptions{DevPrincipalHeader: devHeader})(mux),
+		auth.Attach(sessions, auth.AttachOptions{
+			DevPrincipalHeader: devHeader,
+			Agents:             agentStore,
+		})(mux),
 	)
 
-	srv := &http.Server{
+	// --- HTTP listener (:3000) ---
+	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-
 	go func() {
-		slog.Info("dominion api gateway listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server failed", "err", err)
+		slog.Info("dominion api gateway (http) listening", "addr", addr)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("http server failed", "err", err)
 			stop()
 		}
 	}()
+
+	// --- TLS listener (:3443), accepts agent client certs ---
+	var tlsSrv *http.Server
+	if strings.EqualFold(os.Getenv("DOMINION_TLS_ENABLED"), "true") {
+		tlsSrv, err = startTLS(tlsAddr, handler, authority)
+		if err != nil {
+			slog.Error("tls listener", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		slog.Warn("DOMINION_TLS_ENABLED not true; mTLS agent listener disabled")
+	}
 
 	<-ctx.Done()
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	_ = httpSrv.Shutdown(shutdownCtx)
+	if tlsSrv != nil {
+		_ = tlsSrv.Shutdown(shutdownCtx)
+	}
+}
+
+// startTLS issues a server cert from the internal CA (valid for localhost
+// and any hostnames in DOMINION_TLS_HOSTNAMES) and starts an HTTPS
+// listener that accepts optional client certs. Clients with a valid cert
+// become agent principals; humans with a session cookie still work.
+func startTLS(addr string, handler http.Handler, authority *ca.CA) (*http.Server, error) {
+	hostnames := []string{}
+	if v := os.Getenv("DOMINION_TLS_HOSTNAMES"); v != "" {
+		for _, h := range strings.Split(v, ",") {
+			hostnames = append(hostnames, strings.TrimSpace(h))
+		}
+	}
+	ips := []net.IP{}
+	if v := os.Getenv("DOMINION_TLS_IPS"); v != "" {
+		for _, s := range strings.Split(v, ",") {
+			if ip := net.ParseIP(strings.TrimSpace(s)); ip != nil {
+				ips = append(ips, ip)
+			}
+		}
+	}
+
+	srvCert, err := authority.IssueServer(hostnames, ips)
+	if err != nil {
+		return nil, err
+	}
+	certBlock, _ := pem.Decode(srvCert.CertPEM)
+	keyBlock, _ := pem.Decode(srvCert.KeyPEM)
+	tlsCert := tls.Certificate{
+		Certificate: [][]byte{certBlock.Bytes},
+	}
+	priv, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	tlsCert.PrivateKey = priv
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			ClientAuth:   tls.VerifyClientCertIfGiven,
+			ClientCAs:    authority.ClientCAPool(),
+			MinVersion:   tls.VersionTLS12,
+		},
+	}
+	go func() {
+		slog.Info("dominion api gateway (tls) listening", "addr", addr, "mtls", "optional")
+		if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("tls server failed", "err", err)
+		}
+	}()
+	return srv, nil
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
