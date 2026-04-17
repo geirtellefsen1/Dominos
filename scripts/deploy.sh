@@ -105,7 +105,10 @@ log "building gateway image"
 "${compose[@]}" build gateway
 
 log "starting stack"
-"${compose[@]}" up -d
+# --force-recreate ensures env-file changes (new secrets, new flags) are
+# picked up by already-running containers. Without it, compose caches the
+# previous environment and the gateway silently keeps old values.
+"${compose[@]}" up -d --force-recreate
 
 # --- wait for /health ---
 log "waiting for gateway /health ..."

@@ -12,7 +12,14 @@
 - Linux with Docker 24+ and the `docker compose` plugin.
 - `curl`, `python3`, `openssl` on PATH (all in a default Ubuntu/Debian image).
 - `python3-cryptography` for the Phase 4 signature verification step of
-  `smoke-test.sh`. On Debian/Ubuntu: `sudo apt install python3-cryptography`.
+  `smoke-test.sh`. On Debian/Ubuntu: `sudo apt install -y python3-cryptography`.
+
+## Re-deploying after env changes
+
+`deploy.sh` now runs `docker compose up -d --force-recreate`, so edits to
+`infra/.env` (new secrets, new flags) are always picked up. An in-memory
+datastore like the default OpenFGA config will lose its tuples on recreate;
+re-run `scripts/smoke-test.sh` to re-seed anything that matters.
 - Repo checked out at `/opt/dominion` (or anywhere — scripts locate themselves).
 
 ## One-shot deploy
