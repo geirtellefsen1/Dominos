@@ -8,6 +8,8 @@
 *.out
 bin/
 vendor/
+/packages/*/agent
+/packages/*/gateway
 
 # Node / pnpm
 node_modules/
