@@ -33,6 +33,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("POST /documents", auth.Require(http.HandlerFunc(h.create)))
 	mux.Handle("GET /documents", auth.Require(http.HandlerFunc(h.list)))
 	mux.Handle("GET /documents/{id}", auth.Require(http.HandlerFunc(h.get)))
+	// /me/inbox is phase 6 convenience: authenticated user's email.v1
+	// documents, ACL-filtered, newest first.
+	mux.Handle("GET /me/inbox", auth.Require(http.HandlerFunc(h.inbox)))
 }
 
 type createRequest struct {
@@ -183,6 +186,15 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		docs = []*Document{}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": docs})
+}
+
+func (h *Handler) inbox(w http.ResponseWriter, r *http.Request) {
+	audit.From(r.Context()).Action = "inbox.list"
+	// Delegate to the ACL-aware list path with schema forced.
+	q := r.URL.Query()
+	q.Set("schema", "email.v1")
+	r.URL.RawQuery = q.Encode()
+	h.list(w, r)
 }
 
 // objectID returns the FGA object identifier for a document UUID.

@@ -23,8 +23,10 @@ import (
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/ca"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/cryptokeys"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/db"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/graph"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/scim"
 )
 
@@ -133,6 +135,36 @@ func main() {
 	}
 	audit.NewHandler(auditStore, adminToken).Register(mux)
 	agents.NewHandler(agentStore, authority, adminToken).Register(mux)
+
+	// --- Graph email connector (phase 6) ---
+	encKey, err := cryptokeys.Load()
+	if err != nil {
+		slog.Error("crypto key", "err", err)
+		os.Exit(1)
+	}
+	graphStore := graph.NewStore(pool, encKey)
+	var graphClient *graph.Client
+	if cid := os.Getenv("DOMINION_GRAPH_CLIENT_ID"); cid != "" {
+		graphClient = graph.NewClient(graph.Config{
+			TenantID:     envOr("DOMINION_GRAPH_TENANT_ID", "common"),
+			ClientID:     cid,
+			ClientSecret: os.Getenv("DOMINION_GRAPH_CLIENT_SECRET"),
+			RedirectURL:  envOr("DOMINION_GRAPH_REDIRECT_URL", "http://localhost:3000/connectors/graph/callback"),
+		})
+	} else {
+		slog.Warn("DOMINION_GRAPH_CLIENT_ID not set; /connectors/graph/* disabled (simulate still available if dev flag set)")
+	}
+	ingester := graph.NewIngester(pool, docStore, fgaClient)
+	devSimulate := strings.EqualFold(os.Getenv("DOMINION_DEV_GRAPH_SIMULATE"), "true")
+	if devSimulate {
+		slog.Warn("DOMINION_DEV_GRAPH_SIMULATE=true — /admin/connectors/graph/simulate is exposed. Never enable in production.")
+	}
+	graph.NewHandler(graphStore, graphClient, ingester, adminToken, devSimulate).Register(mux)
+
+	// Start the 60s poller only when we have credentials.
+	if graphClient != nil {
+		go graph.NewPoller(graphStore, graphClient, ingester).Run(ctx)
+	}
 
 	devHeader := strings.EqualFold(os.Getenv("DOMINION_DEV_PRINCIPAL_HEADER"), "true")
 	if devHeader {

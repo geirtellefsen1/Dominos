@@ -376,4 +376,75 @@ agent_events="$(printf '%s' "${bundle}" | python3 -c \
     && pass "audit log contains ${agent_events} events for agent:${agent_id}" \
     || fail "expected >=3 agent events, got ${agent_events}"
 
-log "all smoke tests passed (phases 1, 2, 3, 4, 5)"
+# ------------------------------------------------------------------------
+# 6. Phase 6: email ingestion (simulate path, no live M365 required)
+# ------------------------------------------------------------------------
+simulate="$(grep -E '^DOMINION_DEV_GRAPH_SIMULATE=' "${env_file}" | cut -d= -f2- || true)"
+if [[ "${simulate}" != "true" && "${simulate}" != "True" ]]; then
+    log "Phase 6 skipped — DOMINION_DEV_GRAPH_SIMULATE not true"
+    log "all smoke tests passed (phases 1, 2, 3, 4, 5)"
+    exit 0
+fi
+
+log "6a. simulate a Graph message for alice (should become email.v1 doc)"
+msg_id="smoke-graph-$(date +%s%N)"
+sim_body='{
+  "user_id":"'"${alice_id}"'",
+  "mailbox_user":"'"${alice_email}"'",
+  "message":{
+    "id":"'"${msg_id}"'",
+    "subject":"Simulated Graph message",
+    "bodyPreview":"hello from the fake poller",
+    "receivedDateTime":"2026-04-17T13:00:00Z",
+    "from":{"emailAddress":{"address":"bob@example.com","name":"Bob"}},
+    "toRecipients":[{"emailAddress":{"address":"'"${alice_email}"'"}}],
+    "body":{"contentType":"text","content":"hello from the fake poller"}
+  }
+}'
+sim_resp="$(curl -fsS -X POST "${admin_hdr[@]}" -d "${sim_body}" \
+    "${url}/admin/connectors/graph/simulate")"
+ingested_doc_id="$(printf '%s' "${sim_resp}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')"
+[[ -n "${ingested_doc_id}" ]] || fail "simulate returned no doc id"
+pass "ingested email.v1 document ${ingested_doc_id}"
+
+log "6b. /me/inbox as alice contains the new document"
+inbox="$(curl -fsS "${alice_h[@]}" "${url}/me/inbox")"
+printf '%s' "${inbox}" | grep -q "\"id\":\"${ingested_doc_id}\"" \
+    && pass "alice's /me/inbox lists the ingested email" \
+    || fail "ingested email missing from /me/inbox"
+
+log "6c. bob (no grant) cannot see the ingested email via his inbox"
+bob_inbox="$(curl -fsS "${bob_h[@]}" "${url}/me/inbox")"
+if printf '%s' "${bob_inbox}" | grep -q "\"id\":\"${ingested_doc_id}\""; then
+    fail "bob's inbox should not include alice's ingested email"
+fi
+pass "bob's inbox excludes alice's email"
+
+log "6d. duplicate ingest is a no-op"
+dup_resp="$(curl -fsS -X POST "${admin_hdr[@]}" -d "${sim_body}" \
+    "${url}/admin/connectors/graph/simulate")"
+printf '%s' "${dup_resp}" | grep -q '"status":"duplicate"' \
+    && pass "second ingest for same messageId returns duplicate" \
+    || fail "duplicate ingest should have been rejected, got: ${dup_resp}"
+
+log "6e. Astrid (alice's PA from phase 5) sees the email via reader tuple"
+# Agent was created with owner_user_id = alice in phase 5, so the
+# ingester should have auto-granted it reader on the new document.
+out="$("${agent_cli[@]}" read "${ingested_doc_id}")"
+printf '%s\n' "${out}" | head -3
+printf '%s' "${out}" | grep -q "\"id\":\"${ingested_doc_id}\"" \
+    && pass "PA reader tuple auto-granted on ingest" \
+    || fail "agent cannot read ingested email — PA grant missing"
+
+log "6f. audit log shows the ingest action on behalf of alice"
+bundle="$(curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}")"
+# the simulate call itself runs synchronously as an admin request, so the
+# audited actor is whoever called it (admin token == anonymous principal);
+# what must exist is the subsequent document.read events by alice + agent.
+agent_reads="$(printf '%s' "${bundle}" | python3 -c \
+    'import json,sys;b=json.load(sys.stdin);print(sum(1 for e in b["events"] if e["actor"]=="agent:'"${agent_id}"'" and e["resource"]=="document:'"${ingested_doc_id}"'"))')"
+[[ "${agent_reads}" -ge 1 ]] \
+    && pass "audit shows agent reading the ingested email" \
+    || fail "no agent read event for the ingested email"
+
+log "all smoke tests passed (phases 1, 2, 3, 4, 5, 6)"

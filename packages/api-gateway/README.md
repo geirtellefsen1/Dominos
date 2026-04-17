@@ -31,6 +31,10 @@ audit middleware lands in phases 2–4.
 | POST   | `/admin/agents`         | bearer token; body `{display_name, owner_user_id?}`; returns cert + key PEM (once) |
 | DELETE | `/admin/agents/{id}`    | bearer token; revokes an agent identity |
 | GET    | `/admin/ca/cert`        | unauthenticated; returns Dominion CA cert PEM so callers can verify the TLS listener |
+| GET    | `/connectors/graph/connect`  | authenticated user; redirects to the Microsoft consent page |
+| GET    | `/connectors/graph/callback` | OAuth callback; exchanges code + stores refresh token |
+| POST   | `/admin/connectors/graph/simulate` | dev-only; bearer token; injects a fake Graph message through the real ingest pipeline (gated by `DOMINION_DEV_GRAPH_SIMULATE=true`) |
+| GET    | `/me/inbox`              | authenticated user's `email.v1` documents, newest first, ACL-filtered |
 
 Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 
@@ -53,6 +57,11 @@ Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 | `DOMINION_TLS_HOSTNAMES`     | unset | Comma-separated extra DNS names for the auto-issued server cert. |
 | `DOMINION_TLS_IPS`           | unset | Comma-separated extra IPs for the auto-issued server cert (e.g. droplet public IP). |
 | `DOMINION_CA_CERT_PEM` / `DOMINION_CA_KEY_PEM` | unset | Persistent Ed25519 CA. When blank, a fresh CA is generated on boot (agents issued before a restart stop authenticating). |
+| `DOMINION_ENCRYPTION_KEY`    | random per run | base64 AES-256 key for encrypting stored OAuth refresh tokens. Keep stable or rotate with re-consent. |
+| `DOMINION_GRAPH_CLIENT_ID` / `_CLIENT_SECRET` | unset | Microsoft Graph OAuth app credentials. When blank, the polling loop and `/connectors/graph/*` are disabled. |
+| `DOMINION_GRAPH_TENANT_ID`   | `common` | Entra tenant id or `common` for multi-tenant. |
+| `DOMINION_GRAPH_REDIRECT_URL` | `http://localhost:3000/connectors/graph/callback` | Must match the Entra app registration. |
+| `DOMINION_DEV_GRAPH_SIMULATE` | `false` | **Dev only.** Exposes `/admin/connectors/graph/simulate` for ingest tests without live M365. |
 | `DOMINION_FGA_API_URL`       | unset | e.g. `http://openfga:8080`; when unset ACL is disabled |
 | `DOMINION_FGA_STORE_NAME`    | `dominion` | OpenFGA store to bootstrap |
 | `DOMINION_DEV_PRINCIPAL_HEADER` | `false` | **Dev only.** When `true`, trusts `X-Dominion-Dev-Principal: user:<uuid>` header. |
