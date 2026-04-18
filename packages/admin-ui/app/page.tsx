@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AuditEvent,
+  Draft,
+  DraftBody,
   TriageStats,
   actorChipClass,
   decisionDot,
@@ -368,10 +370,7 @@ function Stage({ cfg }: { cfg: DemoConfig }) {
       )}
       <div className="mt-6 grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)_360px]">
         <AstridPane cfg={cfg} events={events} />
-        <PaneSkeleton
-          title={`${aliceLocal}'s inbox`}
-          subtitle="approval queue"
-        />
+        <InboxPane cfg={cfg} aliceLocal={aliceLocal} events={events} />
         <AuditPane events={events} />
       </div>
     </main>
@@ -555,6 +554,256 @@ function AgentAvatar({ active, running }: { active: boolean; running: boolean })
         <span className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full bg-emerald-400" />
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Inbox pane — email-client styling over the approval queue. Each draft
+// card shows its status as a pill and transitions visibly across
+// pending → sending → sent | rejected. Re-polls on any action so the
+// UI state matches the DB state even if someone else approves
+// concurrently (the gateway's CAS state machine returns 409 in that
+// case — we surface it as an amber banner and refetch).
+// ---------------------------------------------------------------------------
+
+const INBOX_POLL_MS = 3000;
+
+function InboxPane({
+  cfg,
+  aliceLocal,
+  events,
+}: {
+  cfg: DemoConfig;
+  aliceLocal: string;
+  events: AuditEvent[];
+}) {
+  const [items, setItems] = useState<Draft[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null); // draft id currently in flight
+  const [note, setNote] = useState<{ kind: "err" | "info"; msg: string } | null>(null);
+  const alive = useRef(true);
+
+  const principal = `user:${cfg.aliceID}`;
+
+  const refresh = useCallback(async () => {
+    try {
+      const resp = await gfetch<{ items: Draft[] }>("/me/queue", {
+        gateway: cfg.gateway,
+        principal,
+      });
+      if (!alive.current) return;
+      setItems(resp.items || []);
+      setLoading(false);
+    } catch (e: any) {
+      if (alive.current) setNote({ kind: "err", msg: String(e?.message || e) });
+    }
+  }, [cfg.gateway, principal]);
+
+  useEffect(() => {
+    alive.current = true;
+    refresh();
+    const h = setInterval(refresh, INBOX_POLL_MS);
+    return () => {
+      alive.current = false;
+      clearInterval(h);
+    };
+  }, [refresh]);
+
+  const act = async (id: string, verb: "approve" | "reject") => {
+    setBusy(id);
+    setNote(null);
+    try {
+      await gfetch(`/me/queue/${id}/${verb}`, {
+        gateway: cfg.gateway,
+        principal,
+        method: "POST",
+      });
+      setNote({
+        kind: "info",
+        msg: verb === "approve" ? "Sent via Microsoft Graph" : "Draft rejected",
+      });
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      setNote({ kind: "err", msg });
+    } finally {
+      setBusy(null);
+      refresh();
+    }
+  };
+
+  return (
+    <section className="flex max-h-[75vh] flex-col rounded-xl border border-neutral-800 bg-neutral-900/60">
+      <header className="flex items-baseline justify-between border-b border-neutral-800 px-5 py-3">
+        <div>
+          <h3 className="text-sm font-semibold">{aliceLocal}'s inbox</h3>
+          <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+            approval queue · viewing as{" "}
+            <span className="font-mono normal-case text-neutral-400">
+              {shortId(principal, 8)}
+            </span>
+          </div>
+        </div>
+        <span className="rounded-full border border-neutral-800 bg-neutral-950 px-2 py-0.5 text-[10px] text-neutral-400">
+          {items.length} pending
+        </span>
+      </header>
+
+      {note && (
+        <div
+          className={
+            "mx-5 mt-3 rounded-lg border px-3 py-2 text-xs " +
+            (note.kind === "err"
+              ? "border-red-500/30 bg-red-500/5 text-red-300"
+              : "border-emerald-500/30 bg-emerald-500/5 text-emerald-300")
+          }
+        >
+          {note.msg}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto p-5">
+        {loading ? (
+          <div className="py-10 text-center text-xs text-neutral-500">loading…</div>
+        ) : items.length === 0 ? (
+          <div className="py-16 text-center">
+            <div className="mb-2 text-3xl">✉️</div>
+            <div className="text-sm text-neutral-300">All caught up</div>
+            <div className="mt-1 text-[11px] text-neutral-500">
+              Trigger a triage pass from the left to produce drafts.
+            </div>
+          </div>
+        ) : (
+          <ul className="space-y-3">
+            {items.map((d) => (
+              <DraftCard
+                key={d.id}
+                draft={d}
+                busy={busy === d.id}
+                events={events}
+                onApprove={() => act(d.id, "approve")}
+                onReject={() => act(d.id, "reject")}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function DraftCard({
+  draft,
+  busy,
+  events,
+  onApprove,
+  onReject,
+}: {
+  draft: Draft;
+  busy: boolean;
+  events: AuditEvent[];
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  let body: DraftBody | null = null;
+  try {
+    body = JSON.parse(draft.body) as DraftBody;
+  } catch {
+    /* keep null */
+  }
+  const status = body?.status || "pending";
+  const pending = status === "pending";
+
+  // Light a decorative "wrote this" marker if the audit stream has the
+  // triage.draft_created event for this exact doc id — lets the operator
+  // see the ink drying in both panes.
+  const justDrafted = useMemo(
+    () =>
+      events.some(
+        (e) =>
+          e.action === "triage.draft_created" &&
+          e.resource === `document:${draft.id}`
+      ),
+    [events, draft.id]
+  );
+
+  return (
+    <li className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4 transition hover:border-neutral-700">
+      <header className="mb-2 flex items-center gap-2">
+        <StatusPill status={status} />
+        {justDrafted && (
+          <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-medium text-violet-300">
+            drafted by Astrid
+          </span>
+        )}
+        <span className="ml-auto text-[10px] text-neutral-500">
+          to {(body?.to || []).join(", ") || "—"}
+        </span>
+      </header>
+
+      <h4 className="mb-1 text-sm font-medium text-neutral-100">
+        {body?.subject || "(no subject)"}
+      </h4>
+      <p className="mb-3 line-clamp-3 whitespace-pre-wrap text-xs leading-relaxed text-neutral-400">
+        {body?.body || "(empty body)"}
+      </p>
+
+      {body?.sentMessageId && (
+        <div className="mb-3 truncate rounded border border-emerald-500/20 bg-emerald-500/5 px-2 py-1 font-mono text-[10px] text-emerald-300">
+          message-id: {body.sentMessageId}
+        </div>
+      )}
+
+      {pending ? (
+        <div className="flex items-center gap-2">
+          <button
+            disabled={busy}
+            onClick={onApprove}
+            className="rounded-lg bg-neutral-100 px-3 py-1.5 text-xs font-medium text-neutral-900 transition hover:bg-white disabled:opacity-40"
+          >
+            {busy ? "Sending…" : "Approve · send via Graph"}
+          </button>
+          <button
+            disabled={busy}
+            onClick={onReject}
+            className="rounded-lg border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 transition hover:border-neutral-500 disabled:opacity-40"
+          >
+            Reject
+          </button>
+        </div>
+      ) : (
+        <div className="text-[11px] text-neutral-500">
+          {status === "sent" && "Message out. Audit log has the proof."}
+          {status === "rejected" && "Rejected — never sent."}
+          {status === "sending" && "In flight…"}
+          {status === "error" && "Send failed — inspect the audit log."}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function StatusPill({ status }: { status: string }) {
+  const style =
+    status === "pending"
+      ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+      : status === "sending"
+      ? "border-sky-500/30 bg-sky-500/10 text-sky-300 animate-pulse"
+      : status === "sent"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+      : status === "rejected"
+      ? "border-neutral-700 bg-neutral-800 text-neutral-400 line-through"
+      : "border-red-500/30 bg-red-500/10 text-red-300";
+  const label =
+    status === "sent" ? "sent ✓" : status === "pending" ? "pending" : status;
+  return (
+    <span
+      className={
+        "rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide " +
+        style
+      }
+    >
+      {label}
+    </span>
   );
 }
 
