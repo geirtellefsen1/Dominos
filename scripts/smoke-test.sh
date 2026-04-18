@@ -188,14 +188,15 @@ log "4b. export audit bundle"
 from_ts="$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
           || python3 -c 'import datetime as d;print((d.datetime.utcnow()-d.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 export_url="${url}/admin/audit?from=${from_ts}"
-bundle="$(curl -fsS "${admin_hdr[@]}" "${export_url}")"
-count="$(printf '%s' "${bundle}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["count"])')"
+bundle_file="/tmp/dominion-audit-bundle.json"
+curl -fsS "${admin_hdr[@]}" "${export_url}" -o "${bundle_file}"
+count="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["count"])' "${bundle_file}")"
 [[ "${count}" -ge 100 ]] \
     && pass "bundle contains ${count} entries (>=100)" \
     || fail "expected >=100 entries, got ${count}"
 
 log "4c. verify every signature with the published public key"
-printf '%s' "${bundle}" | python3 - <<'PY'
+python3 - "${bundle_file}" <<'PY'
 import json, sys, base64
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -203,7 +204,8 @@ def canon(ev):
     ev = {k: v for k, v in ev.items() if k != "signature"}
     return json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
-bundle = json.load(sys.stdin)
+with open(sys.argv[1]) as f:
+    bundle = json.load(f)
 current_kid = bundle["key_id"]
 pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(bundle["public_key_base64"]))
 
@@ -233,7 +235,7 @@ PY
     || fail "one or more audit entries failed to verify"
 
 log "4d. tamper with one entry — only that entry should fail"
-printf '%s' "${bundle}" | python3 - <<'PY'
+python3 - "${bundle_file}" <<'PY'
 import json, sys, base64
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -241,7 +243,8 @@ def canon(ev):
     ev = {k: v for k, v in ev.items() if k != "signature"}
     return json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
-bundle = json.load(sys.stdin)
+with open(sys.argv[1]) as f:
+    bundle = json.load(f)
 current_kid = bundle["key_id"]
 pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(bundle["public_key_base64"]))
 
@@ -386,9 +389,13 @@ printf '%s' "${out}" | grep -q '"schema_id":"draft.v1"' \
     || fail "agent draft write failed"
 
 log "5g. audit bundle contains agent actions"
-bundle="$(curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}")"
-agent_events="$(printf '%s' "${bundle}" | python3 -c \
-    'import json,sys;b=json.load(sys.stdin);print(sum(1 for e in b["events"] if e["actor"]=="agent:'"${agent_id}"'"))')"
+curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}" -o "${bundle_file}"
+agent_events="$(python3 - "${bundle_file}" <<PY
+import json,sys
+b=json.load(open(sys.argv[1]))
+print(sum(1 for e in b["events"] if e["actor"]=="agent:${agent_id}"))
+PY
+)"
 [[ "${agent_events}" -ge 3 ]] \
     && pass "audit log contains ${agent_events} events for agent:${agent_id}" \
     || fail "expected >=3 agent events, got ${agent_events}"
@@ -454,12 +461,16 @@ printf '%s' "${out}" | grep -q "\"id\":\"${ingested_doc_id}\"" \
     || fail "agent cannot read ingested email — PA grant missing"
 
 log "6f. audit log shows the ingest action on behalf of alice"
-bundle="$(curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}")"
+curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}" -o "${bundle_file}"
 # the simulate call itself runs synchronously as an admin request, so the
 # audited actor is whoever called it (admin token == anonymous principal);
 # what must exist is the subsequent document.read events by alice + agent.
-agent_reads="$(printf '%s' "${bundle}" | python3 -c \
-    'import json,sys;b=json.load(sys.stdin);print(sum(1 for e in b["events"] if e["actor"]=="agent:'"${agent_id}"'" and e["resource"]=="document:'"${ingested_doc_id}"'"))')"
+agent_reads="$(python3 - "${bundle_file}" <<PY
+import json,sys
+b=json.load(open(sys.argv[1]))
+print(sum(1 for e in b["events"] if e["actor"]=="agent:${agent_id}" and e["resource"]=="document:${ingested_doc_id}"))
+PY
+)"
 [[ "${agent_reads}" -ge 1 ]] \
     && pass "audit shows agent reading the ingested email" \
     || fail "no agent read event for the ingested email"
@@ -514,9 +525,13 @@ new_drafts="$(printf '%s' "${second_run}" | python3 -c 'import json,sys;print(js
     || fail "second triage pass created ${new_drafts} drafts; expected 0"
 
 log "7g. audit bundle shows the approve on behalf of alice"
-bundle="$(curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}")"
-approve_events="$(printf '%s' "${bundle}" | python3 -c \
-    'import json,sys;b=json.load(sys.stdin);print(sum(1 for e in b["events"] if e["actor"]=="user:'"${alice_id}"'" and "/me/queue/" in e.get("resource","")))')"
+curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}" -o "${bundle_file}"
+approve_events="$(python3 - "${bundle_file}" <<PY
+import json,sys
+b=json.load(open(sys.argv[1]))
+print(sum(1 for e in b["events"] if e["actor"]=="user:${alice_id}" and "/me/queue/" in e.get("resource","")))
+PY
+)"
 [[ "${approve_events}" -ge 1 ]] \
     && pass "audit shows alice approving the draft" \
     || fail "no approve event for alice in audit"
@@ -558,9 +573,13 @@ printf '%s\n' "${triage_after}" | head -3
 pass "triage ran (revoked agent is excluded from pair list)"
 
 log "8e. audit bundle shows the DELETE /admin/agents event"
-bundle="$(curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}")"
-revoke_events="$(printf '%s' "${bundle}" | python3 -c \
-    'import json,sys;b=json.load(sys.stdin);print(sum(1 for e in b["events"] if "/admin/agents/" in e.get("resource","") or "agent.revoke"==e.get("action","")))')"
+curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}" -o "${bundle_file}"
+revoke_events="$(python3 - "${bundle_file}" <<'PY'
+import json,sys
+b=json.load(open(sys.argv[1]))
+print(sum(1 for e in b["events"] if "/admin/agents/" in e.get("resource","") or "agent.revoke"==e.get("action","")))
+PY
+)"
 [[ "${revoke_events}" -ge 1 ]] \
     && pass "audit shows agent revocation" \
     || fail "no agent revocation event in audit"
