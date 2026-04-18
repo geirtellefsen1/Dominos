@@ -211,12 +211,13 @@ func (h *Handler) sendOnBehalf(ctx context.Context, principalID string, body *dr
 	if err != nil {
 		return errors.New("approve must be called by a user principal")
 	}
-	account, err := h.graphStore.GetForUser(ctx, userID)
+	// GetForUserWithToken decrypts refresh_token_ciphertext; the
+	// plaintext-free GetForUser used to be called here and silently
+	// passed an empty string to Graph.Refresh.
+	account, err := h.graphStore.GetForUserWithToken(ctx, userID)
 	if err != nil {
 		return err
 	}
-	// Upsert is the cheapest path to a decrypted refresh token; the
-	// poller's own path decrypts via ListActive but we can just refresh.
 	tok, err := h.graphClient.Refresh(ctx, account.RefreshToken)
 	if err != nil {
 		return err

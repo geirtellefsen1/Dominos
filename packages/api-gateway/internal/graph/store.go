@@ -107,7 +107,9 @@ func (s *Store) ListActive(ctx context.Context) ([]*Account, error) {
 	return out, rows.Err()
 }
 
-// GetForUser returns the user's graph account or ErrAccountNotFound.
+// GetForUser returns the user's graph account WITHOUT the refresh
+// token. Use this when you only need metadata (mailbox address, last
+// sync, revocation status).
 func (s *Store) GetForUser(ctx context.Context, userID uuid.UUID) (*Account, error) {
 	const q = `
         SELECT id, user_id, provider, external_account_id,
@@ -124,6 +126,42 @@ func (s *Store) GetForUser(ctx context.Context, userID uuid.UUID) (*Account, err
 		return nil, ErrAccountNotFound
 	}
 	return a, err
+}
+
+// GetForUserWithToken returns the user's graph account AND decrypts
+// the refresh token for immediate Graph API use (send mail, one-off
+// polls). Keep the plaintext on the stack — don't stash it.
+//
+// The Phase 7 approve-and-send path relies on this: without the
+// decrypted refresh token, queue.sendOnBehalf was calling Microsoft
+// with an empty string and every real-tenant send returned 502.
+func (s *Store) GetForUserWithToken(ctx context.Context, userID uuid.UUID) (*Account, error) {
+	const q = `
+        SELECT id, user_id, provider, external_account_id,
+               refresh_token_ciphertext,
+               last_synced_at, COALESCE(last_error,''), created_at, revoked_at
+        FROM connector_accounts
+        WHERE user_id = $1 AND provider = $2
+    `
+	a := &Account{}
+	var ct []byte
+	err := s.pool.QueryRow(ctx, q, userID, Provider).Scan(
+		&a.ID, &a.UserID, &a.Provider, &a.ExternalAccountID,
+		&ct,
+		&a.LastSyncedAt, &a.LastError, &a.CreatedAt, &a.RevokedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAccountNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	pt, err := s.aead.Open(ct)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt refresh token for %s: %w", a.ID, err)
+	}
+	a.RefreshToken = string(pt)
+	return a, nil
 }
 
 // TouchSynced records a successful poll; ClearError / SetError manage
