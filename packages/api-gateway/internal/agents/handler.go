@@ -2,7 +2,6 @@ package agents
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -21,39 +20,30 @@ import (
 // audit -> auth -> agents import cycle.
 type RevokeSubjectTuples func(ctx context.Context, principal string) (int, error)
 
+// AdminAuth is an http middleware that enforces the admin bearer
+// token and attaches an admin principal to the context. main.go wires
+// this to auth.RequireBearer — the agents package can't import auth
+// directly (auth already imports agents for AttachOptions.Agents,
+// which would create a cycle) so we pass it in as a value.
+type AdminAuth func(http.Handler) http.Handler
+
 type Handler struct {
 	store        *Store
 	ca           *ca.CA
 	revokeTuples RevokeSubjectTuples
-	token        string
+	adminAuth    AdminAuth
 }
 
-func NewHandler(store *Store, ca *ca.CA, revokeTuples RevokeSubjectTuples, token string) *Handler {
-	return &Handler{store: store, ca: ca, revokeTuples: revokeTuples, token: token}
+func NewHandler(store *Store, ca *ca.CA, revokeTuples RevokeSubjectTuples, adminAuth AdminAuth) *Handler {
+	return &Handler{store: store, ca: ca, revokeTuples: revokeTuples, adminAuth: adminAuth}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.Handle("POST /admin/agents", h.auth(http.HandlerFunc(h.create)))
-	mux.Handle("DELETE /admin/agents/{id}", h.auth(http.HandlerFunc(h.revoke)))
+	mux.Handle("POST /admin/agents", h.adminAuth(http.HandlerFunc(h.create)))
+	mux.Handle("DELETE /admin/agents/{id}", h.adminAuth(http.HandlerFunc(h.revoke)))
 	// The CA cert is public by design — anyone needs it to verify the
 	// gateway's TLS cert and agent certs. Unauthenticated.
 	mux.HandleFunc("GET /admin/ca/cert", h.caCert)
-}
-
-func (h *Handler) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.token == "" {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "admin_disabled",
-				"DOMINION_ADMIN_TOKEN not configured", nil)
-			return
-		}
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
-			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid admin bearer token", nil)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 type createRequest struct {

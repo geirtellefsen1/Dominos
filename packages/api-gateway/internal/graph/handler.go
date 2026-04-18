@@ -2,7 +2,6 @@ package graph
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -40,7 +39,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("GET /connectors/graph/connect", auth.Require(http.HandlerFunc(h.connect)))
 	mux.HandleFunc("GET /connectors/graph/callback", h.callback)
 	if h.devSimulate {
-		mux.Handle("POST /admin/connectors/graph/simulate", h.adminAuth(http.HandlerFunc(h.simulate)))
+		admin := auth.RequireBearer(h.adminToken, "root")
+		mux.Handle("POST /admin/connectors/graph/simulate", admin(http.HandlerFunc(h.simulate)))
 	}
 }
 
@@ -139,21 +139,6 @@ type simulateRequest struct {
 	UserID      uuid.UUID `json:"user_id"`
 	MailboxUser string    `json:"mailbox_user"`
 	Message     Message   `json:"message"`
-}
-
-func (h *Handler) adminAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.adminToken == "" {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "admin_disabled", "", nil)
-			return
-		}
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(h.adminToken)) != 1 {
-			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "", nil)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // simulate runs a fake Graph message through the real ingest pipeline so

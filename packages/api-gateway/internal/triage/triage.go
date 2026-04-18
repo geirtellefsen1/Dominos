@@ -6,7 +6,6 @@ package triage
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -18,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/acl"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/graph"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
@@ -273,22 +273,8 @@ type Handler struct {
 func NewHandler(e *Engine, token string) *Handler { return &Handler{engine: e, token: token} }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.Handle("POST /admin/triage/run", h.auth(http.HandlerFunc(h.run)))
-}
-
-func (h *Handler) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.token == "" {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "admin_disabled", "", nil)
-			return
-		}
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
-			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "", nil)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	admin := auth.RequireBearer(h.token, "root")
+	mux.Handle("POST /admin/triage/run", admin(http.HandlerFunc(h.run)))
 }
 
 func (h *Handler) run(w http.ResponseWriter, r *http.Request) {

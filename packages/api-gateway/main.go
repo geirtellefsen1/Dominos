@@ -168,7 +168,14 @@ func main() {
 		}
 		return revoke.SubjectTuples(ctx, fgaClient, revoke.Principal(principal))
 	}
-	agents.NewHandler(agentStore, authority, revokeSubject, adminToken).Register(mux)
+	// Sprint 1 #2: auth.RequireBearer attaches an admin:root Principal
+	// on success so the audit tap records admin actions as
+	// actor=admin:root instead of the pre-Sprint-1 actor=anonymous.
+	// agents can't import auth (auth already imports agents), so we
+	// pass the middleware in as a callback — same pattern as
+	// revokeSubject above.
+	adminAuth := auth.RequireBearer(adminToken, "root")
+	agents.NewHandler(agentStore, authority, revokeSubject, adminAuth).Register(mux)
 	users.NewHandler(scimStore, sessions, revokeSubject, adminToken).Register(mux)
 
 	// --- Graph email connector (phase 6) ---

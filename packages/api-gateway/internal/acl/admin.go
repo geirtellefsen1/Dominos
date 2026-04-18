@@ -1,18 +1,22 @@
 package acl
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
 )
 
 // AdminHandler exposes POST /admin/acl/grant and /admin/acl/revoke.
-// Bearer-token authenticated via DOMINION_ADMIN_TOKEN — the Phase 9 admin
-// UI will replace this with session-role auth.
+// Bearer-token authenticated via DOMINION_ADMIN_TOKEN — the Phase 9
+// admin UI will replace this with session-role auth eventually.
+//
+// As of Sprint 1 #2, auth.RequireBearer attaches an `admin:root`
+// synthetic principal on success so the audit tap logs who granted
+// or revoked the tuple, instead of the old actor=anonymous.
 type AdminHandler struct {
 	client *Client
 	token  string
@@ -23,25 +27,9 @@ func NewAdminHandler(c *Client, token string) *AdminHandler {
 }
 
 func (h *AdminHandler) Register(mux *http.ServeMux) {
-	mux.Handle("POST /admin/acl/grant", h.auth(http.HandlerFunc(h.grant)))
-	mux.Handle("POST /admin/acl/revoke", h.auth(http.HandlerFunc(h.revoke)))
-}
-
-func (h *AdminHandler) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.token == "" {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "admin_disabled",
-				"DOMINION_ADMIN_TOKEN not configured", nil)
-			return
-		}
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
-			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized",
-				"invalid admin bearer token", nil)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	admin := auth.RequireBearer(h.token, "root")
+	mux.Handle("POST /admin/acl/grant", admin(http.HandlerFunc(h.grant)))
+	mux.Handle("POST /admin/acl/revoke", admin(http.HandlerFunc(h.revoke)))
 }
 
 type grantRequest struct {

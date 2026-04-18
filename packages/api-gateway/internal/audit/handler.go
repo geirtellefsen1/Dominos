@@ -1,16 +1,17 @@
 package audit
 
 import (
-	"crypto/subtle"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
 )
 
 // Handler exposes /admin/audit (export) and /admin/audit/key (pubkey).
-// Both routes require DOMINION_ADMIN_TOKEN via Authorization: Bearer.
+// Both routes require DOMINION_ADMIN_TOKEN via Authorization: Bearer;
+// auth.RequireBearer attaches an admin:root synthetic principal so the
+// audit tap records who exported the bundle.
 type Handler struct {
 	store *Store
 	token string
@@ -21,27 +22,9 @@ func NewHandler(store *Store, token string) *Handler {
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.Handle("GET /admin/audit", h.auth(http.HandlerFunc(h.export)))
-	// The key is public by design — the compliance officer needs it to
-	// verify exports — but we still gate it behind the admin token for
-	// consistency; in production it can be served unauthenticated.
-	mux.Handle("GET /admin/audit/key", h.auth(http.HandlerFunc(h.key)))
-}
-
-func (h *Handler) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.token == "" {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "admin_disabled",
-				"DOMINION_ADMIN_TOKEN not configured", nil)
-			return
-		}
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
-			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid admin bearer token", nil)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	admin := auth.RequireBearer(h.token, "root")
+	mux.Handle("GET /admin/audit", admin(http.HandlerFunc(h.export)))
+	mux.Handle("GET /admin/audit/key", admin(http.HandlerFunc(h.key)))
 }
 
 func (h *Handler) export(w http.ResponseWriter, r *http.Request) {

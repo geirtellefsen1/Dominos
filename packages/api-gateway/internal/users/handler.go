@@ -6,11 +6,9 @@ package users
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/google/uuid"
 
@@ -37,23 +35,8 @@ func NewHandler(scimStore *scim.Store, sessions *auth.SessionStore, revokeTuples
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.Handle("DELETE /admin/users/{id}", h.auth(http.HandlerFunc(h.revoke)))
-}
-
-func (h *Handler) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.token == "" {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "admin_disabled",
-				"DOMINION_ADMIN_TOKEN not configured", nil)
-			return
-		}
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
-			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid admin bearer token", nil)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	admin := auth.RequireBearer(h.token, "root")
+	mux.Handle("DELETE /admin/users/{id}", admin(http.HandlerFunc(h.revoke)))
 }
 
 // revoke implements DELETE /admin/users/{id} — spec §3.4's one-revoke

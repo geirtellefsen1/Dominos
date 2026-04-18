@@ -1,7 +1,6 @@
 package scim
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -25,29 +24,17 @@ func NewHandler(store *Store, sessions *auth.SessionStore, token string) *Handle
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.Handle("POST /scim/v2/Users", h.auth(http.HandlerFunc(h.create)))
-	mux.Handle("GET /scim/v2/Users", h.auth(http.HandlerFunc(h.list)))
-	mux.Handle("GET /scim/v2/Users/{id}", h.auth(http.HandlerFunc(h.get)))
-	mux.Handle("PATCH /scim/v2/Users/{id}", h.auth(http.HandlerFunc(h.patch)))
-	mux.Handle("PUT /scim/v2/Users/{id}", h.auth(http.HandlerFunc(h.put)))
-	mux.Handle("DELETE /scim/v2/Users/{id}", h.auth(http.HandlerFunc(h.delete)))
-}
-
-// --- bearer auth ---------------------------------------------------------
-
-func (h *Handler) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.token == "" {
-			writeErr(w, http.StatusServiceUnavailable, "SCIM bearer token is not configured", "")
-			return
-		}
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
-			writeErr(w, http.StatusUnauthorized, "invalid bearer token", "")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	// SCIM uses its own bearer (DOMINION_SCIM_TOKEN) so Entra's
+	// provisioning agent doesn't need the more-privileged admin
+	// bearer. auth.RequireBearer attaches an admin:scim principal to
+	// the context on success so the audit tap records the SCIM call.
+	scimAuth := auth.RequireBearer(h.token, "scim")
+	mux.Handle("POST /scim/v2/Users", scimAuth(http.HandlerFunc(h.create)))
+	mux.Handle("GET /scim/v2/Users", scimAuth(http.HandlerFunc(h.list)))
+	mux.Handle("GET /scim/v2/Users/{id}", scimAuth(http.HandlerFunc(h.get)))
+	mux.Handle("PATCH /scim/v2/Users/{id}", scimAuth(http.HandlerFunc(h.patch)))
+	mux.Handle("PUT /scim/v2/Users/{id}", scimAuth(http.HandlerFunc(h.put)))
+	mux.Handle("DELETE /scim/v2/Users/{id}", scimAuth(http.HandlerFunc(h.delete)))
 }
 
 // --- handlers ------------------------------------------------------------
