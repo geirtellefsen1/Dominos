@@ -1,10 +1,53 @@
 # api-gateway
 
-Single entry point for all client traffic. Every request flows through three
-middlewares in order: auth → ACL check → audit tap (spec §3.1).
+Single entry point for all client traffic. Every request flows through the
+middleware chain: CORS → auth (cookie | client cert | admin bearer | dev
+header) → audit tap → route handler. Spec §3.1 and §3.4.
 
 Phase 1: `/health` + document store & schema registry. Real auth + ACL +
 audit middleware lands in phases 2–4.
+
+## Listeners
+
+The gateway binds two ports. Both serve the same routes and the same
+middleware chain; they differ only in how a caller can authenticate.
+
+| Port | Scheme | Primary caller | Authentication options |
+| ---- | ------ | -------------- | ---------------------- |
+| `:3000`  | plain HTTP | admin UI, smoke tests, internal dev | session cookie · admin bearer · SCIM bearer · `X-Dominion-Dev-Principal` (when `DOMINION_DEV_PRINCIPAL_HEADER=true`) |
+| `:3443`  | TLS, cert auto-issued from the internal CA | AI agents over mTLS | **client cert signed by the Dominion CA** · any of the `:3000` options |
+
+### Why `:3443` accepts session cookies too (dual-auth)
+
+`tls.VerifyClientCertIfGiven` — not `RequireAndVerifyClientCert`. A caller
+may present a client cert (becomes an `agent:<uuid>` principal) **or** a
+session cookie (becomes a `user:<uuid>` principal) on the same TLS
+endpoint. This is intentional:
+
+- Agents running off-host need TLS + mTLS — `:3443` is the port they
+  target. Requiring cert auth there is the spec §3.5 invariant.
+- Humans who happen to hit the TLS URL from a browser (e.g. after an
+  operator shared the HTTPS demo link) should still be able to log in
+  with their session cookie rather than getting a blanket TLS handshake
+  failure.
+- Admin scripts using `Authorization: Bearer` can speak to either port.
+
+The gateway never accepts an unauthenticated request on either listener;
+the combination of auth.Attach (resolves any of four principal sources)
+and per-route `auth.Require` / `auth.RequireBearer` makes that property
+explicit at each handler.
+
+### What NOT to do
+
+- Do not expose `:3443` to the public internet. The CA is private; no
+  browser trust store knows it. Agents inside the VPC / same host can
+  verify via the CA cert served at `/admin/ca/cert`, but a browser
+  visitor will just get a scary TLS warning.
+- Do not expose `:3000` to the public internet either. Cookies and
+  bearer tokens fly in plaintext. Put a TLS terminator (Caddy, nginx)
+  in front for any public deployment, and set `DOMINION_COOKIES_SECURE=true`
+  so cookies get the `Secure` attribute even though `r.TLS` is nil
+  at the gateway.
 
 ## Routes (phase 1–2)
 
