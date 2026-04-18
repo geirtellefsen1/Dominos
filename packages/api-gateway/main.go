@@ -211,15 +211,27 @@ func main() {
 		slog.Warn("DOMINION_DEV_PRINCIPAL_HEADER=true — X-Dominion-Dev-Principal header is trusted. Never enable in production.")
 	}
 	// Middleware order (outer → inner):
-	//   audit  → the tap records every request that reaches the gateway
-	//   attach → resolves Principal from cookie / client cert / dev header
-	//   mux    → route handlers
-	handler := audit.Middleware(auditStore)(
-		auth.Attach(sessions, auth.AttachOptions{
-			DevPrincipalHeader: devHeader,
-			Agents:             agentStore,
-			Users:              userStore,
-		})(mux),
+	//   attach → resolves Principal from cookie / client cert / dev
+	//            header; writes a new request.Context containing the
+	//            principal and forwards it to the next handler.
+	//   audit  → receives that enriched context and records the
+	//            principal as the actor when the response returns.
+	//
+	// Order matters: auth.Attach replaces r via r.WithContext(...). If
+	// audit wrapped auth instead, audit's outer-scoped `r` would never
+	// see the principal auth attached on the inner request, and every
+	// event would be logged as actor=anonymous.
+	//
+	// Trade-off: requests auth rejects outright (revoked-agent 401,
+	// inactive user 401) are not audited. Those are attempted accesses
+	// by an already-rejected identity; the revocation event itself IS
+	// audited at the admin call, which preserves the governance claim.
+	handler := auth.Attach(sessions, auth.AttachOptions{
+		DevPrincipalHeader: devHeader,
+		Agents:             agentStore,
+		Users:              userStore,
+	})(
+		audit.Middleware(auditStore)(mux),
 	)
 
 	// --- HTTP listener (:3000) ---
