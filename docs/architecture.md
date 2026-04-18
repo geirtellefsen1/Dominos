@@ -25,8 +25,8 @@ is the short in-repo reference.
 | 5 | AI identity + OpenClaw fork | mTLS agent, gateway-routed tools | complete (OpenClaw surgery deferred) |
 | 6 | Email ingestion | new mail → `email.v1` doc < 90s | complete (live M365 tenant wiring deferred) |
 | 7 | Hero flow (Astrid + approval queue) | end-to-end §4 runs | complete |
-| 8 | Offboarding primitive | one DELETE revokes everywhere | **in progress** |
-| 9 | Minimal admin UI | non-engineer can run §4 via UI | pending |
+| 8 | Offboarding primitive | one DELETE revokes everywhere | complete |
+| 9 | Minimal admin UI | non-engineer can run §4 via UI | **in progress** |
 
 ## The non-negotiable invariant
 

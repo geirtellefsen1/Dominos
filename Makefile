@@ -1,4 +1,4 @@
-.PHONY: up down gateway dev logs ps health test
+.PHONY: up down gateway admin-ui dev logs ps health test
 
 COMPOSE := docker compose -f infra/docker-compose.yml
 
@@ -16,6 +16,9 @@ ps:
 
 gateway:
 	cd packages/api-gateway && go run .
+
+admin-ui:
+	cd packages/admin-ui && npm run dev
 
 dev: up gateway
 

@@ -23,6 +23,7 @@ import (
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/ca"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/cors"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/cryptokeys"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/db"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
@@ -211,6 +212,8 @@ func main() {
 		slog.Warn("DOMINION_DEV_PRINCIPAL_HEADER=true — X-Dominion-Dev-Principal header is trusted. Never enable in production.")
 	}
 	// Middleware order (outer → inner):
+	//   cors   → short-circuits OPTIONS preflights; reflects the admin
+	//            UI origin on responses.
 	//   attach → resolves Principal from cookie / client cert / dev
 	//            header; writes a new request.Context containing the
 	//            principal and forwards it to the next handler.
@@ -226,12 +229,14 @@ func main() {
 	// inactive user 401) are not audited. Those are attempted accesses
 	// by an already-rejected identity; the revocation event itself IS
 	// audited at the admin call, which preserves the governance claim.
-	handler := auth.Attach(sessions, auth.AttachOptions{
-		DevPrincipalHeader: devHeader,
-		Agents:             agentStore,
-		Users:              userStore,
-	})(
-		audit.Middleware(auditStore)(mux),
+	handler := cors.Middleware(os.Getenv("DOMINION_CORS_ORIGIN"))(
+		auth.Attach(sessions, auth.AttachOptions{
+			DevPrincipalHeader: devHeader,
+			Agents:             agentStore,
+			Users:              userStore,
+		})(
+			audit.Middleware(auditStore)(mux),
+		),
 	)
 
 	// --- HTTP listener (:3000) ---

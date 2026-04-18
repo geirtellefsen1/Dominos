@@ -81,6 +81,7 @@ services:
       DOMINION_TRIAGE_INTERVAL: ${DOMINION_TRIAGE_INTERVAL:-5m}
       DOMINION_TRIAGE_LOOKBACK: ${DOMINION_TRIAGE_LOOKBACK:-1h}
       DOMINION_DEV_SIMULATE_SEND: ${DOMINION_DEV_SIMULATE_SEND:-}
+      DOMINION_CORS_ORIGIN: ${DOMINION_CORS_ORIGIN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,6 +90,15 @@ services:
     ports:
       - "3000:3000"
       - "3443:3443"
+    restart: unless-stopped
+
+  admin-ui:
+    build:
+      context: ../packages/admin-ui
+      dockerfile: Dockerfile
+    container_name: dominion-admin-ui
+    ports:
+      - "3100:3100"
     restart: unless-stopped
 
 volumes:

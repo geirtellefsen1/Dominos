@@ -72,6 +72,7 @@ Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 | `DOMINION_TRIAGE_INTERVAL`   | `5m` | Triage pass cadence. |
 | `DOMINION_TRIAGE_LOOKBACK`   | `1h` | How far back each pass scans for untriaged emails. |
 | `DOMINION_DEV_SIMULATE_SEND` | unset | **Dev only.** When `true`, `/me/queue/*/approve` records a fake `sentMessageId` instead of calling Graph. Auto-on when `DOMINION_DEV_GRAPH_SIMULATE=true` and no Graph client is configured. |
+| `DOMINION_CORS_ORIGIN`       | unset | Comma-separated list of browser origins that receive CORS headers from the gateway (for the admin UI). |
 | `DOMINION_FGA_API_URL`       | unset | e.g. `http://openfga:8080`; when unset ACL is disabled |
 | `DOMINION_FGA_STORE_NAME`    | `dominion` | OpenFGA store to bootstrap |
 | `DOMINION_DEV_PRINCIPAL_HEADER` | `false` | **Dev only.** When `true`, trusts `X-Dominion-Dev-Principal: user:<uuid>` header. |
