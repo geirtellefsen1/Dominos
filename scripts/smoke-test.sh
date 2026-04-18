@@ -204,20 +204,32 @@ def canon(ev):
     return json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 bundle = json.load(sys.stdin)
+current_kid = bundle["key_id"]
 pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(bundle["public_key_base64"]))
-events = bundle["events"]
+
+# Filter to events signed by the CURRENT key. Events signed by an older
+# key (ephemeral key before DOMINION_AUDIT_PRIVATE_KEY was persisted,
+# or a pre-rotation key) are still present in the bundle but can't be
+# verified without that key's pubkey — a future /admin/audit/keys
+# endpoint can return the full history; for now they are skipped.
+active = [e for e in bundle["events"] if e.get("key_id") == current_kid]
+skipped = len(bundle["events"]) - len(active)
+if not active:
+    print(f"no events match current key_id={current_kid}; total={len(bundle['events'])}")
+    sys.exit(1)
+
 bad = 0
-for ev in events:
+for ev in active:
     sig = base64.b64decode(ev["signature"])
     try:
         pub.verify(sig, canon(ev))
     except Exception:
         bad += 1
-print(f"verified_ok={len(events)-bad} verified_fail={bad}")
+print(f"verified_ok={len(active)-bad} verified_fail={bad} skipped_other_keys={skipped}")
 sys.exit(0 if bad == 0 else 1)
 PY
 [[ $? -eq 0 ]] \
-    && pass "every audit entry verifies" \
+    && pass "every audit entry for the current key_id verifies" \
     || fail "one or more audit entries failed to verify"
 
 log "4d. tamper with one entry — only that entry should fail"
@@ -230,13 +242,18 @@ def canon(ev):
     return json.dumps(ev, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 bundle = json.load(sys.stdin)
+current_kid = bundle["key_id"]
 pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(bundle["public_key_base64"]))
-events = bundle["events"]
-# Flip the decision of the middle entry.
-target = len(events) // 2
-events[target]["decision"] = "tampered"
+
+active = [e for e in bundle["events"] if e.get("key_id") == current_kid]
+if len(active) < 2:
+    print(f"need at least 2 active events to run tamper test; got {len(active)}")
+    sys.exit(1)
+
+target = len(active) // 2
+active[target]["decision"] = "tampered"
 failures = []
-for i, ev in enumerate(events):
+for i, ev in enumerate(active):
     sig = base64.b64decode(ev["signature"])
     try:
         pub.verify(sig, canon(ev))
