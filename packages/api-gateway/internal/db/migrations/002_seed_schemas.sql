@@ -38,7 +38,7 @@ INSERT INTO schemas (id, json_schema) VALUES
     "body":                { "type": "string" },
     "generatedByAgent":    { "type": "string", "minLength": 1 },
     "generatedAt":         { "type": "string", "format": "date-time" },
-    "status":              { "type": "string", "enum": ["pending", "approved", "rejected", "sent"] },
+    "status":              { "type": "string", "enum": ["pending", "sending", "approved", "rejected", "sent", "error"] },
     "sentMessageId":       { "type": "string" }
   }
 }

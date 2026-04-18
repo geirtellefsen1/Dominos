@@ -156,89 +156,116 @@ func (h *Handler) transition(w http.ResponseWriter, r *http.Request, approve boo
 		}
 	}
 
-	doc, err := h.documents.Get(r.Context(), id)
-	if errors.Is(err, documents.ErrNotFound) {
-		httpx.WriteError(w, http.StatusNotFound, "not_found", "draft not found", nil)
+	// --- reject: single atomic pending -> rejected, no Graph call ---
+	if !approve {
+		updated, err := h.documents.UpdateDraftStatus(r.Context(), id,
+			"pending", "rejected", nil, principal.ID)
+		if errors.Is(err, documents.ErrStatusMismatch) {
+			httpx.WriteError(w, http.StatusConflict, "not_pending",
+				"draft is not pending — already sent, rejected, or in flight", nil)
+			return
+		}
+		if err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, updated)
+		return
+	}
+
+	// --- approve: idempotent state machine ---
+	//
+	//   pending -> sending   (CAS; wins the right to call Graph)
+	//   sending -> sent      (on Graph success, with real internetMessageId)
+	//   sending -> pending   (on Graph error, so the user can retry)
+	//
+	// A second concurrent approve sees status=sending and gets 409,
+	// which is what we want: no double-send.
+
+	acquired, err := h.documents.UpdateDraftStatus(r.Context(), id,
+		"pending", "sending", nil, principal.ID)
+	if errors.Is(err, documents.ErrStatusMismatch) {
+		httpx.WriteError(w, http.StatusConflict, "not_pending",
+			"draft is not pending — already sent, rejected, or in flight", nil)
 		return
 	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
 		return
 	}
-	if doc.SchemaID != "draft.v1" {
+	if acquired.SchemaID != "draft.v1" {
+		// Release: flip back to pending (shouldn't happen — UpdateDraftStatus filters on schema_id).
+		_, _ = h.documents.UpdateDraftStatus(r.Context(), id, "sending", "pending", nil, principal.ID)
 		httpx.WriteError(w, http.StatusBadRequest, "wrong_schema",
 			"only draft.v1 documents are in the queue", nil)
 		return
 	}
 	var body draftBody
-	if err := json.Unmarshal(doc.Body, &body); err != nil {
+	if err := json.Unmarshal(acquired.Body, &body); err != nil {
+		_, _ = h.documents.UpdateDraftStatus(r.Context(), id, "sending", "pending", nil, principal.ID)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
 		return
 	}
-	if body.Status != "pending" {
-		httpx.WriteError(w, http.StatusConflict, "not_pending",
-			"draft is already "+body.Status, nil)
-		return
-	}
 
-	if !approve {
-		body.Status = "rejected"
-		h.writeAndRespond(w, r.Context(), doc.ID, body, principal.ID)
-		return
-	}
-
-	// --- approve: send the mail, then flip status to sent ---
-	if err := h.sendOnBehalf(r.Context(), principal.ID, &body); err != nil {
+	internetMessageID, err := h.sendOnBehalf(r.Context(), principal.ID, &body)
+	if err != nil {
+		// Release the sending lock so the user can retry.
+		_, _ = h.documents.UpdateDraftStatus(r.Context(), id, "sending", "pending", nil, principal.ID)
 		httpx.WriteError(w, http.StatusBadGateway, "send_failed", err.Error(), nil)
 		return
 	}
-	body.Status = "sent"
-	h.writeAndRespond(w, r.Context(), doc.ID, body, principal.ID)
+
+	// Commit: sending -> sent, persisting the real Graph
+	// internetMessageId so downstream dedup can use it.
+	sent, err := h.documents.UpdateDraftStatus(r.Context(), id,
+		"sending", "sent",
+		map[string]string{"sentMessageId": internetMessageID},
+		principal.ID)
+	if err != nil {
+		// Email is out but DB commit failed — operator intervention
+		// needed. Loud log, 500 response with the real message id so
+		// the operator can reconcile.
+		slog.Error("approve commit failed after Graph send",
+			"doc", id, "internetMessageID", internetMessageID, "err", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "commit_failed",
+			"email sent but draft record stuck in 'sending' — operator must reconcile. Sent message id: "+internetMessageID,
+			nil)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, sent)
 }
 
-// sendOnBehalf either calls Graph /me/sendMail with the user's token or,
-// when SimulateSend is true, records a deterministic fake sentMessageId.
-func (h *Handler) sendOnBehalf(ctx context.Context, principalID string, body *draftBody) error {
+// sendOnBehalf either calls Graph (create-draft + send, returning the
+// real RFC 5322 internetMessageId) or, when SimulateSend is true,
+// fabricates a stable dedup key derived from the draft body so the
+// smoke test has something deterministic to assert on.
+func (h *Handler) sendOnBehalf(ctx context.Context, principalID string, body *draftBody) (string, error) {
 	if h.simulateSend {
-		body.SentMessageID = "sim-" + time.Now().UTC().Format("20060102T150405.000000000")
+		fake := "sim:" + time.Now().UTC().Format("20060102T150405.000000000")
 		slog.Info("simulate-send", "principal", principalID, "to", body.To, "subject", body.Subject)
-		return nil
+		return fake, nil
 	}
 	if h.graphClient == nil || h.graphStore == nil {
-		return errors.New("graph connector not configured")
+		return "", errors.New("graph connector not configured")
 	}
 	userID, err := uuid.Parse(strings.TrimPrefix(principalID, "user:"))
 	if err != nil {
-		return errors.New("approve must be called by a user principal")
+		return "", errors.New("approve must be called by a user principal")
 	}
-	// GetForUserWithToken decrypts refresh_token_ciphertext; the
-	// plaintext-free GetForUser used to be called here and silently
-	// passed an empty string to Graph.Refresh.
+	// GetForUserWithToken decrypts refresh_token_ciphertext (Sprint 1 #1
+	// fix — pre-Sprint-1 we called GetForUser and passed the empty
+	// string to Graph.Refresh).
 	account, err := h.graphStore.GetForUserWithToken(ctx, userID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	tok, err := h.graphClient.Refresh(ctx, account.RefreshToken)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := h.graphClient.SendMail(ctx, tok.AccessToken, body.Subject, body.Body, body.To, body.Cc); err != nil {
-		return err
-	}
-	body.SentMessageID = "graph-" + time.Now().UTC().Format("20060102T150405.000000000")
-	return nil
-}
-
-func (h *Handler) writeAndRespond(w http.ResponseWriter, ctx context.Context, id uuid.UUID, body draftBody, principalID string) {
-	raw, err := json.Marshal(body)
+	internetID, err := h.graphClient.SendMail(ctx, tok.AccessToken, body.Subject, body.Body, body.To, body.Cc)
 	if err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
-		return
+		return "", err
 	}
-	updated, err := h.documents.UpdateBody(ctx, id, raw, principalID)
-	if err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, updated)
+	return internetID, nil
 }

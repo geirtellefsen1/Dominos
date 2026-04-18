@@ -85,6 +85,63 @@ func (s *Store) Get(ctx context.Context, id uuid.UUID) (*Document, error) {
 	return d, nil
 }
 
+// ErrStatusMismatch is returned by UpdateDraftStatus when the draft's
+// current status is not what the caller expected. The caller either
+// lost a race (concurrent approve) or is acting on a stale view.
+var ErrStatusMismatch = errors.New("draft status mismatch")
+
+// UpdateDraftStatus atomically transitions a draft.v1 document from
+// fromStatus to toStatus. Extra body fields can be merged in via
+// `setFields` — e.g. {"sentMessageId": "<rfc5322 id>"} alongside the
+// transition to "sent".
+//
+// Returns ErrStatusMismatch if the current body->>'status' is not
+// fromStatus, which is how the queue.approve handler detects a
+// concurrent approve (and returns 409 without calling Graph). This is
+// the primitive that makes Sprint 1 #5 possible: send-once semantics
+// despite retries, page refreshes, or racing clicks.
+func (s *Store) UpdateDraftStatus(
+	ctx context.Context,
+	id uuid.UUID,
+	fromStatus, toStatus string,
+	setFields map[string]string,
+	principal string,
+) (*Document, error) {
+	patch := map[string]string{"status": toStatus}
+	for k, v := range setFields {
+		patch[k] = v
+	}
+	patchJSON, err := json.Marshal(patch)
+	if err != nil {
+		return nil, err
+	}
+	const q = `
+        UPDATE documents
+        SET body = body || $3::jsonb,
+            updated_at = now(),
+            updated_by = $4
+        WHERE id = $1
+          AND schema_id = 'draft.v1'
+          AND deleted_at IS NULL
+          AND body->>'status' = $2
+        RETURNING id, schema_id, tenant_id, body, created_at, created_by, updated_at, updated_by, deleted_at
+    `
+	d := &Document{}
+	err = s.pool.QueryRow(ctx, q, id, fromStatus, patchJSON, principal).Scan(
+		&d.ID, &d.SchemaID, &d.TenantID, &d.Body,
+		&d.CreatedAt, &d.CreatedBy, &d.UpdatedAt, &d.UpdatedBy, &d.DeletedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Either the draft doesn't exist, is already in a different
+		// status, or got soft-deleted out from under us.
+		return nil, ErrStatusMismatch
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update draft status: %w", err)
+	}
+	return d, nil
+}
+
 // UpdateBody replaces the `body` JSONB of a document and bumps updated_at +
 // updated_by. Schema validation is the caller's responsibility.
 func (s *Store) UpdateBody(ctx context.Context, id uuid.UUID, body json.RawMessage, principal string) (*Document, error) {

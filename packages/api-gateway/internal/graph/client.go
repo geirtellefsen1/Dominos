@@ -190,9 +190,22 @@ func (c *Client) ListMessages(ctx context.Context, accessToken string, since tim
 	return resp.Value, nil
 }
 
-// SendMail posts a message via /me/sendMail. `to` / `cc` are plain
-// email addresses; `subject` and `body` are the obvious fields.
-func (c *Client) SendMail(ctx context.Context, accessToken, subject, bodyText string, to, cc []string) error {
+// SendMail creates a draft in the user's mailbox, captures the real
+// Graph internetMessageId, and sends the draft. Returns the RFC 5322
+// Message-ID — useful downstream as a dedup / thread-key across any
+// sent-items consumer.
+//
+// Why two round-trips instead of one POST /me/sendMail? /me/sendMail
+// returns 202 with an empty body; we never learn the Graph-assigned
+// message id. The create-draft + send pattern does:
+//
+//  1. POST /me/messages      → { id: <graph guid>, internetMessageId }
+//  2. POST /me/messages/{id}/send
+//
+// If step 2 fails the draft stays in the user's Drafts folder; the
+// caller gets the error and the approval flow flips the row back to
+// `pending` so the user can retry.
+func (c *Client) SendMail(ctx context.Context, accessToken, subject, bodyText string, to, cc []string) (string, error) {
 	mkRecipients := func(xs []string) []map[string]any {
 		out := make([]map[string]any, 0, len(xs))
 		for _, addr := range xs {
@@ -200,29 +213,56 @@ func (c *Client) SendMail(ctx context.Context, accessToken, subject, bodyText st
 		}
 		return out
 	}
-	payload := map[string]any{
-		"message": map[string]any{
-			"subject":      subject,
-			"body":         map[string]string{"contentType": "Text", "content": bodyText},
-			"toRecipients": mkRecipients(to),
-			"ccRecipients": mkRecipients(cc),
-		},
-		"saveToSentItems": true,
+	draft := map[string]any{
+		"subject":      subject,
+		"body":         map[string]string{"contentType": "Text", "content": bodyText},
+		"toRecipients": mkRecipients(to),
+		"ccRecipients": mkRecipients(cc),
 	}
-	buf, _ := json.Marshal(payload)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.apiBase()+"/me/sendMail", bytes.NewReader(buf))
+	buf, _ := json.Marshal(draft)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.apiBase()+"/me/messages", bytes.NewReader(buf))
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("graph sendMail %s: %s", resp.Status, string(raw))
+		return "", fmt.Errorf("graph create draft %s: %s", resp.Status, string(raw))
 	}
-	return nil
+	var created struct {
+		ID                string `json:"id"`
+		InternetMessageID string `json:"internetMessageId"`
+	}
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return "", fmt.Errorf("graph create draft: parse response: %w", err)
+	}
+	if created.ID == "" {
+		return "", fmt.Errorf("graph create draft: response missing id (raw=%s)", string(raw))
+	}
+
+	// Step 2: send the draft we just created.
+	sendURL := c.cfg.apiBase() + "/me/messages/" + created.ID + "/send"
+	req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, sendURL, nil)
+	req2.Header.Set("Authorization", "Bearer "+accessToken)
+	resp2, err := c.http.Do(req2)
+	if err != nil {
+		return "", err
+	}
+	raw2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode >= 300 {
+		return "", fmt.Errorf("graph send draft %s: %s", resp2.Status, string(raw2))
+	}
+	if created.InternetMessageID != "" {
+		return created.InternetMessageID, nil
+	}
+	// Fallback: some Graph tenants don't populate internetMessageId on
+	// the create response; use the Graph guid as a stable dedup key.
+	return "graph:" + created.ID, nil
 }
 
 func (c *Client) get(ctx context.Context, token, path string, out any) error {
