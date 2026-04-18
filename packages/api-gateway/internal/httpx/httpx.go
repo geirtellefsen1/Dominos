@@ -29,12 +29,3 @@ func DecodeJSON(r *http.Request, v any) error {
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
 }
-
-// DevPrincipal reads X-Dominion-Dev-Principal for phase 1 local dev only.
-// Phase 2 replaces this with the OIDC / mTLS auth middleware.
-func DevPrincipal(r *http.Request) string {
-	if p := r.Header.Get("X-Dominion-Dev-Principal"); p != "" {
-		return p
-	}
-	return "dev:anonymous"
-}
