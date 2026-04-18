@@ -3,11 +3,13 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/acl"
@@ -133,9 +135,18 @@ func (i *Ingester) exists(ctx context.Context, mailbox, messageID string) (bool,
     `
 	var one int
 	err := i.pool.QueryRow(ctx, q, messageID, mailbox).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Genuine "no prior row" — message is new, proceed with ingest.
+		return false, nil
+	}
 	if err != nil {
-		// pgx.ErrNoRows falls through as err != nil but not a real error.
-		return false, nil //nolint:nilerr // treated as "doesn't exist"
+		// Real DB error (pool exhausted, query timeout, network blip).
+		// Before Sprint 1 #4 this also returned (false, nil), so the
+		// ingester happily re-created the document on every subsequent
+		// poll and wrote duplicate owner/reader tuples into FGA. Now
+		// we bubble the error so the caller marks the account with
+		// last_error and waits for the next tick.
+		return false, fmt.Errorf("check message existence: %w", err)
 	}
 	return true, nil
 }
