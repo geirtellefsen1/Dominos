@@ -40,10 +40,12 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	// Production-mode guardrail: refuse to start with dev shims
-	// enabled. deploy.sh performs the same check before starting
-	// compose; this is the belt-and-braces layer for a direct
-	// `go run` / `docker run` that skips deploy.sh.
+	// Production-mode guardrails: refuse to start with dev shims
+	// enabled AND refuse to start with unset key material that would
+	// otherwise silently generate an ephemeral replacement.
+	// deploy.sh performs the same checks before starting compose;
+	// this is the belt-and-braces layer for a direct `go run` /
+	// `docker run` that skips deploy.sh.
 	if strings.EqualFold(os.Getenv("DOMINION_ENV"), "production") {
 		var devFlags []string
 		for _, k := range []string{"DOMINION_DEV_PRINCIPAL_HEADER", "DOMINION_DEV_GRAPH_SIMULATE", "DOMINION_DEV_SIMULATE_SEND"} {
@@ -54,6 +56,35 @@ func main() {
 		if len(devFlags) > 0 {
 			slog.Error("refusing to start in DOMINION_ENV=production with dev shims enabled",
 				"flags", devFlags)
+			os.Exit(1)
+		}
+
+		// Each fallback here is correctness-critical. Without them set:
+		//   DOMINION_SESSION_SECRET       -> every session cookie fails verification after restart
+		//   DOMINION_AUDIT_PRIVATE_KEY    -> prior audit exports no longer verify (spec §3.7)
+		//   DOMINION_ENCRYPTION_KEY       -> every stored Graph refresh token becomes undecryptable
+		//   DOMINION_CA_CERT_PEM/KEY_PEM  -> every previously-issued agent cert stops authenticating
+		// In DOMINION_ENV=production we refuse rather than silently
+		// generate and log a warning the operator may never see.
+		requiredInProd := []string{
+			"DOMINION_SESSION_SECRET",
+			"DOMINION_AUDIT_PRIVATE_KEY",
+			"DOMINION_ENCRYPTION_KEY",
+			"DOMINION_CA_CERT_PEM",
+			"DOMINION_CA_KEY_PEM",
+			"DOMINION_ADMIN_TOKEN",
+			"DOMINION_SCIM_TOKEN",
+		}
+		var unset []string
+		for _, k := range requiredInProd {
+			if os.Getenv(k) == "" {
+				unset = append(unset, k)
+			}
+		}
+		if len(unset) > 0 {
+			slog.Error("refusing to start in DOMINION_ENV=production with unset key material",
+				"unset", unset,
+				"hint", "set each var in infra/.env (or KMS / Vault) before deploying; see packages/api-gateway/README.md")
 			os.Exit(1)
 		}
 	}
