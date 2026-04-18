@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dominion MVP deploy — phases 0-2.
+# Dominion MVP deploy.
 #
 # Usage (run on the target host, from anywhere in the repo):
 #   scripts/deploy.sh [--with-mock-oidc] [--skip-smoke]
@@ -7,11 +7,17 @@
 # What it does:
 #   1. Sanity-checks docker + docker compose.
 #   2. Creates infra/.env from .env.example if missing.
-#   3. Generates DOMINION_SESSION_SECRET and DOMINION_SCIM_TOKEN if blank.
-#   4. Builds + starts the docker compose stack (gateway + postgres).
-#      With --with-mock-oidc also starts the bundled navikt mock IdP.
-#   5. Waits for /health to return 200.
-#   6. Runs scripts/smoke-test.sh against the running gateway.
+#   3. Generates DOMINION_SESSION_SECRET, DOMINION_SCIM_TOKEN,
+#      DOMINION_ADMIN_TOKEN, DOMINION_AUDIT_PRIVATE_KEY,
+#      DOMINION_ENCRYPTION_KEY, POSTGRES_PASSWORD if blank.
+#   4. Refuses to continue if any DOMINION_DEV_* flag is true unless
+#      DOMINION_ENV=development is set. Flip the flag you need for
+#      local work, leave DOMINION_ENV blank/production for deploys
+#      that touch real data.
+#   5. Builds + starts the docker compose stack (gateway + postgres +
+#      admin-ui). With --with-mock-oidc also starts the mock IdP.
+#   6. Waits for /health to return 200.
+#   7. Runs scripts/smoke-test.sh against the running gateway.
 #
 # Safe to re-run: all steps are idempotent.
 
@@ -92,6 +98,30 @@ ensure_secret DOMINION_ENCRYPTION_KEY 32
 ensure_secret POSTGRES_PASSWORD 18
 
 chmod 600 "${env_file}"
+
+# --- refuse to start with dev shims enabled in production ---
+# Any of the DOMINION_DEV_* flags set to true at this point makes the
+# gateway trivially bypassable (dev-principal header asserts identity
+# without a cert or session; graph-simulate skips the mail path). Only
+# allow them through when DOMINION_ENV=development is set explicitly.
+env_mode="$(grep -E '^DOMINION_ENV=' "${env_file}" | cut -d= -f2- || true)"
+enabled_dev_flags=()
+while IFS= read -r line; do
+    key="${line%%=*}"
+    val="${line#*=}"
+    if [[ "${val}" == "true" || "${val}" == "True" ]]; then
+        enabled_dev_flags+=("${key}")
+    fi
+done < <(grep -E '^DOMINION_DEV_[A-Z_]*=' "${env_file}" || true)
+
+if [[ ${#enabled_dev_flags[@]} -gt 0 && "${env_mode}" != "development" ]]; then
+    printf '\n' >&2
+    warn "dev-only flags are ENABLED in ${env_file}:"
+    for k in "${enabled_dev_flags[@]}"; do
+        printf '         %s=true\n' "${k}" >&2
+    done
+    die "refusing to deploy with dev shims on. Either set DOMINION_ENV=development in ${env_file} (local / smoke-test), or flip the flags above to false (production)."
+fi
 
 # --- compose up ---
 compose=(docker compose --env-file "${env_file}" -f infra/docker-compose.yml)

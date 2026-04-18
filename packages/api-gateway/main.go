@@ -40,6 +40,24 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	// Production-mode guardrail: refuse to start with dev shims
+	// enabled. deploy.sh performs the same check before starting
+	// compose; this is the belt-and-braces layer for a direct
+	// `go run` / `docker run` that skips deploy.sh.
+	if strings.EqualFold(os.Getenv("DOMINION_ENV"), "production") {
+		var devFlags []string
+		for _, k := range []string{"DOMINION_DEV_PRINCIPAL_HEADER", "DOMINION_DEV_GRAPH_SIMULATE", "DOMINION_DEV_SIMULATE_SEND"} {
+			if strings.EqualFold(os.Getenv(k), "true") {
+				devFlags = append(devFlags, k)
+			}
+		}
+		if len(devFlags) > 0 {
+			slog.Error("refusing to start in DOMINION_ENV=production with dev shims enabled",
+				"flags", devFlags)
+			os.Exit(1)
+		}
+	}
+
 	addr := envOr("DOMINION_GATEWAY_ADDR", ":3000")
 	tlsAddr := envOr("DOMINION_GATEWAY_TLS_ADDR", ":3443")
 	dsn := envOr("DOMINION_DATABASE_URL",
