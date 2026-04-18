@@ -55,8 +55,16 @@ func (e *Event) canonicalBytes() ([]byte, error) {
 		m["resource"] = e.Resource
 	}
 	if len(e.Context) > 0 {
+		// Decode with UseNumber so large integers don't silently
+		// round-trip through float64 (which loses precision above
+		// 2^53 and re-emits integer-valued values like 3000 as
+		// "3000" or "3e+03" depending on magnitude). The Python
+		// verifier's json.dumps(sort_keys=True) preserves int shape
+		// exactly — we need the Go signer to match.
+		dec := json.NewDecoder(bytes.NewReader(e.Context))
+		dec.UseNumber()
 		var ctx any
-		if err := json.Unmarshal(e.Context, &ctx); err != nil {
+		if err := dec.Decode(&ctx); err != nil {
 			return nil, fmt.Errorf("decode context: %w", err)
 		}
 		m["context"] = ctx
