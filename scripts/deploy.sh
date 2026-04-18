@@ -132,8 +132,12 @@ fi
 log "pulling base images"
 "${compose[@]}" pull --ignore-buildable-images || warn "pull partially failed; continuing"
 
-log "building gateway image"
-"${compose[@]}" build gateway
+log "building service images"
+# Build every service we have a build: context for, not just the
+# gateway. Before Sprint-era this line was `build gateway` and the
+# admin-ui / demo UI image never refreshed — `up --force-recreate`
+# only recreates containers, it does not rebuild images.
+"${compose[@]}" build
 
 log "starting stack"
 # --force-recreate ensures env-file changes (new secrets, new flags) are
