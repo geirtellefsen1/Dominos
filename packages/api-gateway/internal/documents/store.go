@@ -85,6 +85,29 @@ func (s *Store) Get(ctx context.Context, id uuid.UUID) (*Document, error) {
 	return d, nil
 }
 
+// UpdateBody replaces the `body` JSONB of a document and bumps updated_at +
+// updated_by. Schema validation is the caller's responsibility.
+func (s *Store) UpdateBody(ctx context.Context, id uuid.UUID, body json.RawMessage, principal string) (*Document, error) {
+	const q = `
+        UPDATE documents
+        SET body = $2, updated_at = now(), updated_by = $3
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING id, schema_id, tenant_id, body, created_at, created_by, updated_at, updated_by, deleted_at
+    `
+	d := &Document{}
+	err := s.pool.QueryRow(ctx, q, id, body, principal).Scan(
+		&d.ID, &d.SchemaID, &d.TenantID, &d.Body,
+		&d.CreatedAt, &d.CreatedBy, &d.UpdatedAt, &d.UpdatedBy, &d.DeletedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update document: %w", err)
+	}
+	return d, nil
+}
+
 type ListParams struct {
 	SchemaID string
 	// IDs, when non-nil, restricts results to this set (empty slice → no

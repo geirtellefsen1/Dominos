@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -187,6 +188,41 @@ func (c *Client) ListMessages(ctx context.Context, accessToken string, since tim
 		return nil, err
 	}
 	return resp.Value, nil
+}
+
+// SendMail posts a message via /me/sendMail. `to` / `cc` are plain
+// email addresses; `subject` and `body` are the obvious fields.
+func (c *Client) SendMail(ctx context.Context, accessToken, subject, bodyText string, to, cc []string) error {
+	mkRecipients := func(xs []string) []map[string]any {
+		out := make([]map[string]any, 0, len(xs))
+		for _, addr := range xs {
+			out = append(out, map[string]any{"emailAddress": map[string]string{"address": addr}})
+		}
+		return out
+	}
+	payload := map[string]any{
+		"message": map[string]any{
+			"subject":      subject,
+			"body":         map[string]string{"contentType": "Text", "content": bodyText},
+			"toRecipients": mkRecipients(to),
+			"ccRecipients": mkRecipients(cc),
+		},
+		"saveToSentItems": true,
+	}
+	buf, _ := json.Marshal(payload)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.apiBase()+"/me/sendMail", bytes.NewReader(buf))
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("graph sendMail %s: %s", resp.Status, string(raw))
+	}
+	return nil
 }
 
 func (c *Client) get(ctx context.Context, token, path string, out any) error {

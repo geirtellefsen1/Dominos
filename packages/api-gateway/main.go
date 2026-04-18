@@ -27,7 +27,10 @@ import (
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/db"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/graph"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/llm"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/queue"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/scim"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/triage"
 )
 
 func main() {
@@ -166,6 +169,30 @@ func main() {
 		go graph.NewPoller(graphStore, graphClient, ingester).Run(ctx)
 	}
 
+	// --- Triage engine + approval queue (phase 7) ---
+	llmClient := llm.New()
+	if llmClient.IsStub() {
+		slog.Warn("DOMINION_ANTHROPIC_API_KEY not set; triage runs in deterministic stub mode")
+	}
+	triageOpts := triage.Options{
+		Interval: envDuration("DOMINION_TRIAGE_INTERVAL", 5*time.Minute),
+		Lookback: envDuration("DOMINION_TRIAGE_LOOKBACK", time.Hour),
+	}
+	triageEngine := triage.NewEngine(pool, docStore, fgaClient, llmClient, triageOpts)
+	triage.NewHandler(triageEngine, adminToken).Register(mux)
+	go triageEngine.Run(ctx)
+
+	simulateSend := strings.EqualFold(os.Getenv("DOMINION_DEV_SIMULATE_SEND"), "true") ||
+		(graphClient == nil && strings.EqualFold(os.Getenv("DOMINION_DEV_GRAPH_SIMULATE"), "true"))
+	if simulateSend {
+		slog.Warn("approval queue will simulate sendMail instead of calling Graph (dev only)")
+	}
+	queue.NewHandler(pool, docStore, fgaClient, queue.Options{
+		GraphStore:   graphStore,
+		GraphClient:  graphClient,
+		SimulateSend: simulateSend,
+	}).Register(mux)
+
 	devHeader := strings.EqualFold(os.Getenv("DOMINION_DEV_PRINCIPAL_HEADER"), "true")
 	if devHeader {
 		slog.Warn("DOMINION_DEV_PRINCIPAL_HEADER=true — X-Dominion-Dev-Principal header is trusted. Never enable in production.")
@@ -280,6 +307,15 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return fallback
 }

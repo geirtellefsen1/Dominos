@@ -23,8 +23,8 @@ is the short in-repo reference.
 | 3 | ACL engine | grant/deny works, audit records both | complete |
 | 4 | Audit log | signed bundle export, tamper detected | complete |
 | 5 | AI identity + OpenClaw fork | mTLS agent, gateway-routed tools | complete (OpenClaw surgery deferred) |
-| 6 | Email ingestion | new mail → `email.v1` doc < 90s | **in progress** |
-| 7 | Hero flow (Astrid + approval queue) | end-to-end §4 runs | pending |
+| 6 | Email ingestion | new mail → `email.v1` doc < 90s | complete (live M365 tenant wiring deferred) |
+| 7 | Hero flow (Astrid + approval queue) | end-to-end §4 runs | **in progress** |
 | 8 | Offboarding primitive | one DELETE revokes everywhere | pending |
 | 9 | Minimal admin UI | non-engineer can run §4 via UI | pending |
 

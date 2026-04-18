@@ -35,6 +35,10 @@ audit middleware lands in phases 2–4.
 | GET    | `/connectors/graph/callback` | OAuth callback; exchanges code + stores refresh token |
 | POST   | `/admin/connectors/graph/simulate` | dev-only; bearer token; injects a fake Graph message through the real ingest pipeline (gated by `DOMINION_DEV_GRAPH_SIMULATE=true`) |
 | GET    | `/me/inbox`              | authenticated user's `email.v1` documents, newest first, ACL-filtered |
+| GET    | `/me/queue`              | authenticated user's pending `draft.v1` documents (approval queue) |
+| POST   | `/me/queue/{id}/approve` | send via Graph `/me/sendMail` (or simulate), mark draft `sent` |
+| POST   | `/me/queue/{id}/reject`  | mark draft `rejected` without sending |
+| POST   | `/admin/triage/run`      | bearer token; run one triage pass immediately across every active PA |
 
 Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 
@@ -62,6 +66,11 @@ Seeded schemas: `email.v1`, `draft.v1` (see `internal/db/migrations`).
 | `DOMINION_GRAPH_TENANT_ID`   | `common` | Entra tenant id or `common` for multi-tenant. |
 | `DOMINION_GRAPH_REDIRECT_URL` | `http://localhost:3000/connectors/graph/callback` | Must match the Entra app registration. |
 | `DOMINION_DEV_GRAPH_SIMULATE` | `false` | **Dev only.** Exposes `/admin/connectors/graph/simulate` for ingest tests without live M365. |
+| `DOMINION_ANTHROPIC_API_KEY` | unset | Anthropic Messages API key. When blank, triage uses a deterministic stub draft. |
+| `DOMINION_ANTHROPIC_MODEL`   | `claude-haiku-4-5-20251001` | Claude model used for triage. |
+| `DOMINION_TRIAGE_INTERVAL`   | `5m` | Triage pass cadence. |
+| `DOMINION_TRIAGE_LOOKBACK`   | `1h` | How far back each pass scans for untriaged emails. |
+| `DOMINION_DEV_SIMULATE_SEND` | unset | **Dev only.** When `true`, `/me/queue/*/approve` records a fake `sentMessageId` instead of calling Graph. Auto-on when `DOMINION_DEV_GRAPH_SIMULATE=true` and no Graph client is configured. |
 | `DOMINION_FGA_API_URL`       | unset | e.g. `http://openfga:8080`; when unset ACL is disabled |
 | `DOMINION_FGA_STORE_NAME`    | `dominion` | OpenFGA store to bootstrap |
 | `DOMINION_DEV_PRINCIPAL_HEADER` | `false` | **Dev only.** When `true`, trusts `X-Dominion-Dev-Principal: user:<uuid>` header. |

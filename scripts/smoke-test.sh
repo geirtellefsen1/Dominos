@@ -464,4 +464,61 @@ agent_reads="$(printf '%s' "${bundle}" | python3 -c \
     && pass "audit shows agent reading the ingested email" \
     || fail "no agent read event for the ingested email"
 
-log "all smoke tests passed (phases 1, 2, 3, 4, 5, 6)"
+# ------------------------------------------------------------------------
+# 7. Phase 7: hero flow — Astrid triages + approval queue
+# ------------------------------------------------------------------------
+log "7a. trigger a triage pass manually"
+triage_resp="$(curl -fsS -X POST "${admin_hdr[@]}" "${url}/admin/triage/run")"
+echo "     ${triage_resp}"
+drafted="$(printf '%s' "${triage_resp}" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("drafts_created",0))')"
+[[ "${drafted}" -ge 1 ]] \
+    && pass "triage produced ${drafted} draft(s)" \
+    || fail "triage produced 0 drafts; expected at least 1 (alice has a PA + recent email)"
+
+log "7b. /me/queue as alice lists the new draft"
+queue_resp="$(curl -fsS "${alice_h[@]}" "${url}/me/queue")"
+draft_id="$(printf '%s' "${queue_resp}" | python3 -c \
+    'import json,sys;items=json.load(sys.stdin)["items"];
+print(items[0]["id"] if items else "")')"
+[[ -n "${draft_id}" ]] || fail "no draft in alice's queue"
+pass "draft ${draft_id} is visible to alice"
+
+log "7c. draft is NOT visible to bob"
+bob_queue="$(curl -fsS "${bob_h[@]}" "${url}/me/queue")"
+if printf '%s' "${bob_queue}" | grep -q "\"id\":\"${draft_id}\""; then
+    fail "bob can see alice's draft; ACL leak"
+fi
+pass "bob's queue excludes alice's draft"
+
+log "7d. alice approves the draft (simulate-send mode)"
+approve_resp="$(curl -fsS -X POST "${alice_h[@]}" "${url}/me/queue/${draft_id}/approve")"
+if printf '%s' "${approve_resp}" | python3 -c \
+    'import json,sys;sys.exit(0 if json.loads(json.load(sys.stdin)["body"])["status"]=="sent" else 1)' 2>/dev/null; then
+    pass "draft transitioned pending -> sent"
+else
+    fail "approve did not set status=sent: ${approve_resp}"
+fi
+
+log "7e. approving an already-sent draft -> 409"
+conflict="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${alice_h[@]}" \
+    "${url}/me/queue/${draft_id}/approve")"
+[[ "${conflict}" == "409" ]] \
+    && pass "second approve correctly rejected with 409" \
+    || fail "expected 409, got ${conflict}"
+
+log "7f. triage run for already-drafted email is a no-op"
+second_run="$(curl -fsS -X POST "${admin_hdr[@]}" "${url}/admin/triage/run")"
+new_drafts="$(printf '%s' "${second_run}" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("drafts_created",0))')"
+[[ "${new_drafts}" -eq 0 ]] \
+    && pass "second triage pass created 0 drafts (de-dup working)" \
+    || fail "second triage pass created ${new_drafts} drafts; expected 0"
+
+log "7g. audit bundle shows the approve on behalf of alice"
+bundle="$(curl -fsS "${admin_hdr[@]}" "${url}/admin/audit?from=${from_ts}")"
+approve_events="$(printf '%s' "${bundle}" | python3 -c \
+    'import json,sys;b=json.load(sys.stdin);print(sum(1 for e in b["events"] if e["actor"]=="user:'"${alice_id}"'" and "/me/queue/" in e.get("resource","")))')"
+[[ "${approve_events}" -ge 1 ]] \
+    && pass "audit shows alice approving the draft" \
+    || fail "no approve event for alice in audit"
+
+log "all smoke tests passed (phases 1, 2, 3, 4, 5, 6, 7)"
