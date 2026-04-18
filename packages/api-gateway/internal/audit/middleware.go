@@ -102,14 +102,21 @@ func Middleware(store *Store) func(http.Handler) http.Handler {
 				Context:    encodeContext(r, rec.status, time.Since(start)),
 			}
 
-			if err := store.Insert(r.Context(), ev); err != nil {
-				// Audit is the governance spine — if it fails we want to
-				// know, but the response has already been written to the
-				// client. Log loudly; a production deploy should alert
-				// on this counter.
+			// Detach from the request context: a client disconnect,
+			// timeout, or parent deadline cancellation between the
+			// response write and this Insert() would otherwise drop the
+			// audit row (pgx respects the context, so Insert returns
+			// context.Canceled and we log + move on). The audit log is
+			// the governance spine — losing entries to network hiccups
+			// on the caller side is unacceptable. 5s is generous for a
+			// single signed INSERT; if the pool itself is wedged we want
+			// the Error log + future healthcheck alert, not silent drop.
+			insertCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := store.Insert(insertCtx, ev); err != nil {
 				slog.Error("audit insert failed", "err", err,
 					"action", ev.Action, "actor", ev.Actor)
 			}
+			cancel()
 		})
 	}
 }
