@@ -1,7 +1,8 @@
 // Package users owns the admin-side user management routes (phase 8).
 // Routine provisioning still flows through SCIM; this package adds the
 // DELETE /admin/users/{id} route that performs the full one-revoke per
-// spec §3.4: mark inactive, kill sessions, strip ACL tuples.
+// spec §3.4: mark inactive, kill sessions, strip ACL tuples, and — as
+// of Sprint 2 #10 — cascade-revoke every agent the user owns.
 package users
 
 import (
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/agents"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/scim"
@@ -26,12 +28,19 @@ type RevokeSubjectTuples func(ctx context.Context, principal string) (int, error
 type Handler struct {
 	scim         *scim.Store
 	sessions     *auth.SessionStore
+	agents       *agents.Store
 	revokeTuples RevokeSubjectTuples
 	token        string
 }
 
-func NewHandler(scimStore *scim.Store, sessions *auth.SessionStore, revokeTuples RevokeSubjectTuples, token string) *Handler {
-	return &Handler{scim: scimStore, sessions: sessions, revokeTuples: revokeTuples, token: token}
+func NewHandler(scimStore *scim.Store, sessions *auth.SessionStore, agentsStore *agents.Store, revokeTuples RevokeSubjectTuples, token string) *Handler {
+	return &Handler{
+		scim:         scimStore,
+		sessions:     sessions,
+		agents:       agentsStore,
+		revokeTuples: revokeTuples,
+		token:        token,
+	}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -39,18 +48,27 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("DELETE /admin/users/{id}", admin(http.HandlerFunc(h.revoke)))
 }
 
+type cascadeResult struct {
+	AgentID       uuid.UUID `json:"agent_id"`
+	TuplesRemoved int       `json:"tuples_removed"`
+	Error         string    `json:"error,omitempty"`
+}
+
 // revoke implements DELETE /admin/users/{id} — spec §3.4's one-revoke
-// for humans. The three steps are performed in order:
+// for humans, extended in Sprint 2 #10 with cascade-to-owned-agents.
+// Steps in order:
 //
-//  1. mark the identity row inactive (SCIM Store.SetActive),
-//  2. revoke every live session so the user can't keep using an
-//     already-issued JWT,
-//  3. strip every FGA tuple where user:<id> is a subject so the ACL
-//     graph no longer authorises them for any document.
+//  1. Mark the user row inactive (SCIM Store.SetActive).
+//  2. Revoke every live session so the user can't keep using an
+//     already-issued JWT.
+//  3. Strip every FGA tuple where user:<id> is a subject.
+//  4. Cascade: for every agent where owner_user_id = id and active,
+//     (a) mark the agent row revoked, (b) strip its FGA tuples. A
+//     best-effort per-agent loop — one agent failing doesn't block
+//     the rest, and the response lists both successes and failures.
 //
-// On partial failure we return a detailed error so the admin can retry;
-// step 1 is idempotent and steps 2–3 can be re-run by calling DELETE
-// again.
+// On partial failure the response carries enough structure that a
+// retry of DELETE resumes cleanly; steps 1–4 are all idempotent.
 func (h *Handler) revoke(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
@@ -58,7 +76,7 @@ func (h *Handler) revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 1: deactivate.
+	// Step 1: deactivate the user row.
 	row, err := h.scim.SetActive(r.Context(), id, false)
 	if errors.Is(err, scim.ErrNotFound) {
 		httpx.WriteError(w, http.StatusNotFound, "not_found", "user not found", nil)
@@ -77,7 +95,7 @@ func (h *Handler) revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3: strip FGA tuples.
+	// Step 3: strip FGA tuples where user:<id> is a subject.
 	tuplesRemoved := 0
 	if h.revokeTuples != nil {
 		n, err := h.revokeTuples(r.Context(), "user:"+id.String())
@@ -90,9 +108,40 @@ func (h *Handler) revoke(w http.ResponseWriter, r *http.Request) {
 		tuplesRemoved = n
 	}
 
+	// Step 4: cascade-revoke every agent the user owns.
+	cascades := []cascadeResult{}
+	if h.agents != nil {
+		ownedIDs, err := h.agents.ListOwnedBy(r.Context(), id)
+		if err != nil {
+			slog.Error("list user agents", "user", id, "err", err)
+			// Don't fail the whole request; the user is already revoked
+			// and sessions / tuples are gone. Surface the cascade error
+			// so the admin knows owned agents may still be active.
+			cascades = append(cascades, cascadeResult{Error: "list owned agents: " + err.Error()})
+		} else {
+			for _, agentID := range ownedIDs {
+				c := cascadeResult{AgentID: agentID}
+				if _, err := h.agents.Revoke(r.Context(), agentID); err != nil {
+					c.Error = "revoke row: " + err.Error()
+					cascades = append(cascades, c)
+					continue
+				}
+				if h.revokeTuples != nil {
+					n, err := h.revokeTuples(r.Context(), "agent:"+agentID.String())
+					if err != nil {
+						c.Error = "acl cleanup: " + err.Error()
+					}
+					c.TuplesRemoved = n
+				}
+				cascades = append(cascades, c)
+			}
+		}
+	}
+
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"user":              row,
 		"sessions_revoked":  sessionsRevoked,
 		"tuples_removed":    tuplesRemoved,
+		"cascaded_agents":   cascades,
 	})
 }

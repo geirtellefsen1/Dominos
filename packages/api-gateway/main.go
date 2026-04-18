@@ -176,7 +176,7 @@ func main() {
 	// revokeSubject above.
 	adminAuth := auth.RequireBearer(adminToken, "root")
 	agents.NewHandler(agentStore, authority, revokeSubject, adminAuth).Register(mux)
-	users.NewHandler(scimStore, sessions, revokeSubject, adminToken).Register(mux)
+	users.NewHandler(scimStore, sessions, agentStore, revokeSubject, adminToken).Register(mux)
 
 	// --- Graph email connector (phase 6) ---
 	encKey, err := cryptokeys.Load()

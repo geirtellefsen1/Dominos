@@ -83,6 +83,29 @@ func (s *Store) Revoke(ctx context.Context, id uuid.UUID) (*Agent, error) {
 	return a, nil
 }
 
+// ListOwnedBy returns the ids of every ACTIVE agent whose
+// owner_user_id = userID. Used by the user one-revoke path (Sprint 2
+// #10) to cascade the user offboarding to their owned agents. Revoked
+// agents are intentionally excluded — a second revoke on an already-
+// inactive agent is wasted work.
+func (s *Store) ListOwnedBy(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	const q = `SELECT id FROM agents WHERE owner_user_id = $1 AND active = TRUE`
+	rows, err := s.pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) Get(ctx context.Context, id uuid.UUID) (*Agent, error) {
 	const q = `
         SELECT id, display_name, thumbprint, owner_user_id, active, created_at, revoked_at
