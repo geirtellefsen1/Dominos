@@ -52,6 +52,13 @@ func (s *Store) EnsurePartitions(ctx context.Context, ahead int) error {
 
 // Insert signs and writes the event. Returns the signed Event for logging.
 func (s *Store) Insert(ctx context.Context, e *Event) error {
+	// Postgres TIMESTAMPTZ is microsecond-precision. If we sign a
+	// nanosecond-precision time.Time and then round-trip through the
+	// DB, the exported value will have been truncated to microseconds,
+	// canonicalBytes() will produce a different string, and Ed25519
+	// verification will fail systematically. Truncate BEFORE signing
+	// so the signed bytes match what Query() will return.
+	e.Timestamp = e.Timestamp.UTC().Truncate(time.Microsecond)
 	e.KeyID = s.keys.KeyID
 	if err := e.Sign(s.keys.Private); err != nil {
 		return fmt.Errorf("sign event: %w", err)
