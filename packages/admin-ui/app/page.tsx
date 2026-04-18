@@ -1,7 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { call } from "../lib/api";
+import {
+  AuditEvent,
+  actorChipClass,
+  decisionDot,
+  gfetch,
+  relTime,
+  shortId,
+} from "../lib/demo";
 
 // ---------------------------------------------------------------------------
 // Keys + types
@@ -14,21 +21,6 @@ const K = {
   astridID:  "dominion:demo_astrid_id",
   aliceMail: "dominion:demo_alice_email",
 } as const;
-
-type AuditEvent = {
-  id: string;
-  timestamp: string;
-  actor: string;
-  on_behalf_of?: string;
-  action: string;
-  resource?: string;
-  decision: "allow" | "deny" | "error";
-};
-
-type Draft = {
-  id: string;
-  body: string; // JSON string
-};
 
 type DemoConfig = {
   gateway: string;
@@ -317,16 +309,124 @@ function Field({
 // Stage — three panes. Wired pane-by-pane in the next commits.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// useAuditFeed — polls /admin/audit every POLL_MS and returns the most
+// recent `limit` events, newest first. `sinceMs` bounds the query window.
+// ---------------------------------------------------------------------------
+
+const POLL_MS = 2000;
+const AUDIT_WINDOW_MS = 10 * 60 * 1000; // last 10 minutes
+
+function useAuditFeed(cfg: DemoConfig, limit = 80) {
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const alive = useRef(true);
+
+  const tick = useCallback(async () => {
+    const from = new Date(Date.now() - AUDIT_WINDOW_MS)
+      .toISOString()
+      .replace(/\.\d+Z$/, "Z");
+    try {
+      const resp = await gfetch<{ events: AuditEvent[] }>(
+        `/admin/audit?from=${encodeURIComponent(from)}`,
+        { gateway: cfg.gateway, admin: cfg.admin }
+      );
+      if (!alive.current) return;
+      const fresh = (resp.events || []).slice(-limit).reverse();
+      setEvents(fresh);
+      setErr(null);
+    } catch (e: any) {
+      if (alive.current) setErr(String(e?.message || e));
+    }
+  }, [cfg.gateway, cfg.admin, limit]);
+
+  useEffect(() => {
+    alive.current = true;
+    tick();
+    const h = setInterval(tick, POLL_MS);
+    return () => {
+      alive.current = false;
+      clearInterval(h);
+    };
+  }, [tick]);
+
+  return { events, err, refresh: tick };
+}
+
 function Stage({ cfg }: { cfg: DemoConfig }) {
+  const { events, err } = useAuditFeed(cfg);
+  const aliceLocal = cfg.aliceMail.split("@")[0] || "alice";
+
   return (
     <main className="mx-auto max-w-[1600px] px-6 py-6">
-      <GovernanceBanner events={[]} />
+      <GovernanceBanner events={events} />
+      {err && (
+        <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-xs text-red-300">
+          audit poll error · {err}
+        </div>
+      )}
       <div className="mt-6 grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)_360px]">
         <PaneSkeleton title="Astrid" subtitle="the AI agent" />
-        <PaneSkeleton title={`${cfg.aliceMail.split("@")[0] || "alice"}'s inbox`} subtitle="approval queue" />
-        <PaneSkeleton title="Audit" subtitle="signed · Ed25519" />
+        <PaneSkeleton
+          title={`${aliceLocal}'s inbox`}
+          subtitle="approval queue"
+        />
+        <AuditPane events={events} />
       </div>
     </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Audit pane — live-streaming, colour-coded by actor kind.
+// ---------------------------------------------------------------------------
+
+function AuditPane({ events }: { events: AuditEvent[] }) {
+  return (
+    <section className="flex max-h-[75vh] flex-col rounded-xl border border-neutral-800 bg-neutral-900/60">
+      <header className="flex items-baseline justify-between border-b border-neutral-800 px-5 py-3">
+        <h3 className="text-sm font-semibold">Audit stream</h3>
+        <span className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-neutral-500">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+          {events.length} · Ed25519 signed
+        </span>
+      </header>
+      <ol className="flex-1 overflow-y-auto">
+        {events.length === 0 ? (
+          <li className="px-5 py-8 text-center text-xs text-neutral-500">
+            waiting for the first event…
+          </li>
+        ) : (
+          events.map((e) => (
+            <li
+              key={e.id}
+              className="border-b border-neutral-900 px-5 py-3 text-xs transition hover:bg-neutral-900/60"
+            >
+              <div className="flex items-center gap-2">
+                <span className={"h-1.5 w-1.5 rounded-full " + decisionDot(e.decision)} />
+                <span
+                  className={
+                    "rounded border px-1.5 py-px font-mono text-[10px] " +
+                    actorChipClass(e.actor)
+                  }
+                >
+                  {shortId(e.actor, 6)}
+                </span>
+                <span className="text-neutral-400">{e.action}</span>
+                <span className="ml-auto text-[10px] text-neutral-600">
+                  {relTime(e.timestamp)}
+                </span>
+              </div>
+              {e.resource && (
+                <div className="mt-1 truncate pl-4 font-mono text-[10px] text-neutral-500">
+                  {e.resource}
+                </div>
+              )}
+            </li>
+          ))
+        )}
+      </ol>
+    </section>
   );
 }
 
@@ -404,33 +504,3 @@ function GovernanceWord({ word, lit }: { word: Word; lit: boolean }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Helpers consumed by the pane wiring in the next commit.
-// ---------------------------------------------------------------------------
-
-export function relTime(iso: string): string {
-  const t = Date.parse(iso);
-  if (isNaN(t)) return iso;
-  const diff = Math.max(0, Date.now() - t);
-  if (diff < 2_000) return "now";
-  if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
-  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)}h ago`;
-  return new Date(t).toLocaleString();
-}
-
-export function actorColor(actor: string): string {
-  if (actor.startsWith("agent:")) return "text-violet-300 bg-violet-500/10 border-violet-500/30";
-  if (actor.startsWith("user:")) return "text-sky-300 bg-sky-500/10 border-sky-500/30";
-  if (actor.startsWith("admin:")) return "text-amber-300 bg-amber-500/10 border-amber-500/30";
-  if (actor.startsWith("system:")) return "text-neutral-400 bg-neutral-800 border-neutral-700";
-  return "text-neutral-400 bg-neutral-800 border-neutral-700";
-}
-
-// hush unused warnings until the next commit wires them in
-void relTime;
-void actorColor;
-// silence unused import warnings from the pane-less skeleton
-void call;
-void useCallback;
-void useRef;
