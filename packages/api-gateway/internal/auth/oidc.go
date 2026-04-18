@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -97,10 +98,10 @@ func (o *OIDC) login(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, 500, "internal_error", "nonce", nil)
 		return
 	}
-	setShortCookie(w, stateCookie, state)
-	setShortCookie(w, nonceCookie, nonce)
+	setShortCookie(w, r, stateCookie, state)
+	setShortCookie(w, r, nonceCookie, nonce)
 	if rt := r.URL.Query().Get("return_to"); rt != "" {
-		setShortCookie(w, returnToCookie, rt)
+		setShortCookie(w, r, returnToCookie, rt)
 	}
 	authURL := o.oauth.AuthCodeURL(state, oidclib.Nonce(nonce))
 	http.Redirect(w, r, authURL, http.StatusFound)
@@ -188,15 +189,15 @@ func (o *OIDC) callback(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, 500, "internal_error", "failed to create session", nil)
 		return
 	}
-	setSessionCookie(w, signed, DefaultSessionTTL)
-	clearShortCookie(w, stateCookie)
-	clearShortCookie(w, nonceCookie)
+	setSessionCookie(w, r, signed, DefaultSessionTTL)
+	clearShortCookie(w, r, stateCookie)
+	clearShortCookie(w, r, nonceCookie)
 
 	returnTo := "/me"
 	if rt, err := r.Cookie(returnToCookie); err == nil && isSafeReturnTo(rt.Value) {
 		returnTo = rt.Value
 	}
-	clearShortCookie(w, returnToCookie)
+	clearShortCookie(w, r, returnToCookie)
 
 	// If the caller is a JSON client (e.g. a smoke test), return JSON instead
 	// of a redirect.
@@ -217,41 +218,56 @@ func (o *OIDC) logout(w http.ResponseWriter, r *http.Request) {
 			_ = o.sessions.RevokeByID(r.Context(), info.SessionID)
 		}
 	}
-	clearSessionCookie(w)
+	clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- cookies -------------------------------------------------------------
 
-func setShortCookie(w http.ResponseWriter, name, value string) {
+// secureCookies reports whether Set-Cookie responses should carry the
+// Secure attribute. True when the current request arrived over TLS
+// (r.TLS != nil), or when the operator sets DOMINION_COOKIES_SECURE=true
+// for deployments behind a TLS-terminating reverse proxy.
+func secureCookies(r *http.Request) bool {
+	if r != nil && r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(os.Getenv("DOMINION_COOKIES_SECURE"), "true")
+}
+
+func setShortCookie(w http.ResponseWriter, r *http.Request, name, value string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secureCookies(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
 }
-func clearShortCookie(w http.ResponseWriter, name string) {
+func clearShortCookie(w http.ResponseWriter, r *http.Request, name string) {
 	http.SetCookie(w, &http.Cookie{
-		Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Name: name, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: secureCookies(r), SameSite: http.SameSiteLaxMode,
 	})
 }
 
-func setSessionCookie(w http.ResponseWriter, value string, ttl time.Duration) {
+func setSessionCookie(w http.ResponseWriter, r *http.Request, value string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secureCookies(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(ttl.Seconds()),
 	})
 }
-func clearSessionCookie(w http.ResponseWriter) {
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
-		Name: SessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Name: SessionCookieName, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: secureCookies(r), SameSite: http.SameSiteLaxMode,
 	})
 }
 

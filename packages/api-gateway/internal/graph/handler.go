@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/google/uuid"
@@ -68,8 +69,8 @@ func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
 		return
 	}
-	setShortCookie(w, graphStateCookie, state)
-	setShortCookie(w, graphUserCookie, p.ID)
+	setShortCookie(w, r, graphStateCookie, state)
+	setShortCookie(w, r, graphUserCookie, p.ID)
 	http.Redirect(w, r, h.client.AuthorizeURL(state), http.StatusFound)
 }
 
@@ -124,8 +125,8 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
 		return
 	}
-	clearShortCookie(w, graphStateCookie)
-	clearShortCookie(w, graphUserCookie)
+	clearShortCookie(w, r, graphStateCookie)
+	clearShortCookie(w, r, graphUserCookie)
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":  "connected",
@@ -178,16 +179,27 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-func setShortCookie(w http.ResponseWriter, name, value string) {
+// secureCookies mirrors auth.secureCookies: Secure when TLS is on the
+// inbound request or DOMINION_COOKIES_SECURE=true (set by operators
+// running behind a TLS terminator).
+func secureCookies(r *http.Request) bool {
+	if r != nil && r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(os.Getenv("DOMINION_COOKIES_SECURE"), "true")
+}
+
+func setShortCookie(w http.ResponseWriter, r *http.Request, name, value string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: value, Path: "/", HttpOnly: true,
+		Secure:   secureCookies(r),
 		SameSite: http.SameSiteLaxMode, MaxAge: 600,
 	})
 }
-func clearShortCookie(w http.ResponseWriter, name string) {
+func clearShortCookie(w http.ResponseWriter, r *http.Request, name string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: secureCookies(r), SameSite: http.SameSiteLaxMode,
 	})
 }
 
