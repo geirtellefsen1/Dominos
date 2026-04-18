@@ -196,7 +196,7 @@ func main() {
 	} else {
 		slog.Warn("DOMINION_GRAPH_CLIENT_ID not set; /connectors/graph/* disabled (simulate still available if dev flag set)")
 	}
-	ingester := graph.NewIngester(pool, docStore, fgaClient)
+	ingester := graph.NewIngester(pool, docStore, fgaClient, auditStore)
 	devSimulate := strings.EqualFold(os.Getenv("DOMINION_DEV_GRAPH_SIMULATE"), "true")
 	if devSimulate {
 		slog.Warn("DOMINION_DEV_GRAPH_SIMULATE=true — /admin/connectors/graph/simulate is exposed. Never enable in production.")
@@ -205,7 +205,7 @@ func main() {
 
 	// Start the 60s poller only when we have credentials.
 	if graphClient != nil {
-		go graph.NewPoller(graphStore, graphClient, ingester).Run(ctx)
+		go graph.NewPoller(graphStore, graphClient, ingester, auditStore).Run(ctx)
 	}
 
 	// --- Triage engine + approval queue (phase 7) ---
@@ -217,7 +217,7 @@ func main() {
 		Interval: envDuration("DOMINION_TRIAGE_INTERVAL", 5*time.Minute),
 		Lookback: envDuration("DOMINION_TRIAGE_LOOKBACK", time.Hour),
 	}
-	triageEngine := triage.NewEngine(pool, docStore, fgaClient, llmClient, triageOpts)
+	triageEngine := triage.NewEngine(pool, docStore, fgaClient, llmClient, auditStore, triageOpts)
 	triage.NewHandler(triageEngine, adminToken).Register(mux)
 	go triageEngine.Run(ctx)
 

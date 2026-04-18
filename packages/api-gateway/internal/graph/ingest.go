@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/acl"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
 )
 
@@ -73,10 +74,11 @@ type Ingester struct {
 	pool      *pgxpool.Pool
 	documents *documents.Store
 	fga       *acl.Client
+	audit     *audit.Store
 }
 
-func NewIngester(pool *pgxpool.Pool, docs *documents.Store, fga *acl.Client) *Ingester {
-	return &Ingester{pool: pool, documents: docs, fga: fga}
+func NewIngester(pool *pgxpool.Pool, docs *documents.Store, fga *acl.Client, auditStore *audit.Store) *Ingester {
+	return &Ingester{pool: pool, documents: docs, fga: fga, audit: auditStore}
 }
 
 // Ingest writes one email.v1 document and returns the inserted row.
@@ -119,6 +121,32 @@ func (i *Ingester) Ingest(ctx context.Context, userID uuid.UUID, body EmailBody)
 		}
 		if err := i.fga.Write(ctx, tuples...); err != nil {
 			return nil, fmt.Errorf("write fga tuples: %w", err)
+		}
+	}
+
+	// Record the ingest as a signed audit row. The inbound HTTP
+	// middleware can't cover this path because the poller runs on a
+	// goroutine with no request object; pre-Sprint-1 this was invisible
+	// to the audit log.
+	if i.audit != nil {
+		ctxBody, _ := json.Marshal(map[string]any{
+			"message_id":   body.MessageID,
+			"mailbox_user": body.MailboxUser,
+			"from":         body.From,
+			"subject":      body.Subject,
+		})
+		ev := &audit.Event{
+			ID:         uuid.New(),
+			Timestamp:  time.Now(),
+			Actor:      "system:graph-ingest",
+			OnBehalfOf: principal,
+			Action:     "graph.ingest",
+			Resource:   "document:" + doc.ID.String(),
+			Decision:   "allow",
+			Context:    ctxBody,
+		}
+		if err := i.audit.Insert(ctx, ev); err != nil {
+			slog.Error("graph ingest audit insert", "err", err)
 		}
 	}
 	return doc, nil

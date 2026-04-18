@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/acl"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/audit"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/auth"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/documents"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/graph"
@@ -29,6 +30,7 @@ type Engine struct {
 	documents *documents.Store
 	fga       *acl.Client
 	llm       *llm.Client
+	audit     *audit.Store
 
 	interval time.Duration
 	lookback time.Duration
@@ -39,7 +41,7 @@ type Options struct {
 	Lookback time.Duration
 }
 
-func NewEngine(pool *pgxpool.Pool, docs *documents.Store, fga *acl.Client, llmc *llm.Client, opts Options) *Engine {
+func NewEngine(pool *pgxpool.Pool, docs *documents.Store, fga *acl.Client, llmc *llm.Client, auditStore *audit.Store, opts Options) *Engine {
 	if opts.Interval <= 0 {
 		opts.Interval = 5 * time.Minute
 	}
@@ -51,8 +53,30 @@ func NewEngine(pool *pgxpool.Pool, docs *documents.Store, fga *acl.Client, llmc 
 		documents: docs,
 		fga:       fga,
 		llm:       llmc,
+		audit:     auditStore,
 		interval:  opts.Interval,
 		lookback:  opts.Lookback,
+	}
+}
+
+// emit is a best-effort audit write from a background job. Failures
+// are logged but do not abort the caller — audit liveness is not on
+// the critical path for triage to finish a pass.
+func (e *Engine) emit(ctx context.Context, ev *audit.Event) {
+	if e.audit == nil {
+		return
+	}
+	if ev.ID == uuid.Nil {
+		ev.ID = uuid.New()
+	}
+	if ev.Timestamp.IsZero() {
+		ev.Timestamp = time.Now()
+	}
+	if ev.Decision == "" {
+		ev.Decision = "allow"
+	}
+	if err := e.audit.Insert(ctx, ev); err != nil {
+		slog.Error("triage audit insert", "action", ev.Action, "err", err)
 	}
 }
 
@@ -73,7 +97,10 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 }
 
-// Pass runs one triage cycle across every (user, agent) pair.
+// Pass runs one triage cycle across every (user, agent) pair. Each
+// pass emits a single `triage.pass` audit row with the aggregate
+// stats; per-draft `triage.draft_created` rows are emitted from
+// triageForPair below.
 func (e *Engine) Pass(ctx context.Context) Stats {
 	stats := Stats{}
 	pairs, err := e.listPAPairs(ctx)
@@ -96,6 +123,18 @@ func (e *Engine) Pass(ctx context.Context) Stats {
 	slog.Info("triage pass", "pairs", stats.PairsChecked,
 		"emails", stats.EmailsProcessed, "drafts", stats.DraftsCreated,
 		"skipped", stats.EmailsSkipped, "errors", stats.Errors)
+
+	decision := "allow"
+	if stats.Errors > 0 {
+		decision = "error"
+	}
+	ctxJSON, _ := json.Marshal(stats)
+	e.emit(ctx, &audit.Event{
+		Actor:    "system:triage",
+		Action:   "triage.pass",
+		Decision: decision,
+		Context:  ctxJSON,
+	})
 	return stats
 }
 
@@ -230,6 +269,23 @@ func (e *Engine) triageForPair(ctx context.Context, p paPair) (processed, drafte
 			}
 		}
 		drafted++
+
+		// Every draft is an agent action that the compliance officer
+		// needs to see in the audit bundle. actor=agent:<id> is what
+		// the spec §3.7 example shows; on_behalf_of=user:<id> tells
+		// the story "Astrid drafted this for Alice".
+		ctxBody, _ := json.Marshal(map[string]any{
+			"in_reply_to": r.ID,
+			"subject":     subject,
+			"to":          email.From,
+		})
+		e.emit(ctx, &audit.Event{
+			Actor:      agentPrincipal,
+			OnBehalfOf: userPrincipal,
+			Action:     "triage.draft_created",
+			Resource:   "document:" + doc.ID.String(),
+			Context:    ctxBody,
+		})
 	}
 	return processed, drafted, skipped, nil
 }
