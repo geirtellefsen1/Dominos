@@ -20,7 +20,7 @@ acceptance test passes.
 - [x] Phase 5 — AI identity + minimal agent CLI (OpenClaw fork deferred)
 - [x] Phase 6 — Email ingestion (Microsoft Graph)
 - [x] Phase 7 — Hero flow: Astrid triages + approval queue
-- [ ] Phase 8 — Offboarding primitive (one-revoke)
+- [x] Phase 8 — Offboarding primitive (one-revoke)
 - [ ] Phase 9 — Minimal admin UI
 
 ## Locked decisions (do not re-open without human approval)

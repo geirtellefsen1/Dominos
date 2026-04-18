@@ -29,7 +29,8 @@ audit middleware lands in phases 2–4.
 | GET    | `/admin/audit`          | bearer `DOMINION_ADMIN_TOKEN`; query `from`, `to`, `actor`; returns signed bundle + pubkey |
 | GET    | `/admin/audit/key`      | Ed25519 pubkey used to sign the log (for offline verification) |
 | POST   | `/admin/agents`         | bearer token; body `{display_name, owner_user_id?}`; returns cert + key PEM (once) |
-| DELETE | `/admin/agents/{id}`    | bearer token; revokes an agent identity |
+| DELETE | `/admin/agents/{id}`    | bearer token; one-revoke: flips `active=false` **and** strips every FGA tuple where `agent:<id>` is a subject |
+| DELETE | `/admin/users/{id}`     | bearer token; one-revoke: deactivates user, revokes all sessions, strips every FGA tuple where `user:<id>` is a subject |
 | GET    | `/admin/ca/cert`        | unauthenticated; returns Dominion CA cert PEM so callers can verify the TLS listener |
 | GET    | `/connectors/graph/connect`  | authenticated user; redirects to the Microsoft consent page |
 | GET    | `/connectors/graph/callback` | OAuth callback; exchanges code + stores refresh token |

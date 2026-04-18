@@ -29,8 +29,10 @@ import (
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/graph"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/llm"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/queue"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/revoke"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/scim"
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/triage"
+	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/users"
 )
 
 func main() {
@@ -59,7 +61,7 @@ func main() {
 
 	// --- auth / identity ---
 	jwtSecret := loadSessionSecret()
-	users := auth.NewUserStore(pool)
+	userStore := auth.NewUserStore(pool)
 	sessions := auth.NewSessionStore(pool, jwtSecret)
 
 	// --- audit ---
@@ -106,7 +108,7 @@ func main() {
 			ClientID:     os.Getenv("DOMINION_OIDC_CLIENT_ID"),
 			ClientSecret: os.Getenv("DOMINION_OIDC_CLIENT_SECRET"),
 			RedirectURL:  envOr("DOMINION_OIDC_REDIRECT_URL", "http://localhost:3000/auth/callback"),
-		}, users, sessions)
+		}, userStore, sessions)
 		if err != nil {
 			slog.Error("oidc init", "err", err)
 			os.Exit(1)
@@ -120,7 +122,7 @@ func main() {
 	validator := documents.NewValidator(docStore)
 	documents.NewHandler(docStore, validator, fgaClient).Register(mux)
 
-	mux.Handle("GET /me", auth.Require(auth.MeHandler(users)))
+	mux.Handle("GET /me", auth.Require(auth.MeHandler(userStore)))
 
 	scimStore := scim.NewStore(pool)
 	scimToken := os.Getenv("DOMINION_SCIM_TOKEN")
@@ -137,7 +139,18 @@ func main() {
 		acl.NewAdminHandler(fgaClient, adminToken).Register(mux)
 	}
 	audit.NewHandler(auditStore, adminToken).Register(mux)
-	agents.NewHandler(agentStore, authority, adminToken).Register(mux)
+
+	// Phase 8 one-revoke: stripping FGA tuples needs acl, which imports
+	// audit — the agents/users packages can't import acl directly or
+	// we get a cycle via auth.Attach. Pass a closure instead.
+	revokeSubject := func(ctx context.Context, principal string) (int, error) {
+		if fgaClient == nil {
+			return 0, nil
+		}
+		return revoke.SubjectTuples(ctx, fgaClient, revoke.Principal(principal))
+	}
+	agents.NewHandler(agentStore, authority, revokeSubject, adminToken).Register(mux)
+	users.NewHandler(scimStore, sessions, revokeSubject, adminToken).Register(mux)
 
 	// --- Graph email connector (phase 6) ---
 	encKey, err := cryptokeys.Load()
@@ -205,6 +218,7 @@ func main() {
 		auth.Attach(sessions, auth.AttachOptions{
 			DevPrincipalHeader: devHeader,
 			Agents:             agentStore,
+			Users:              userStore,
 		})(mux),
 	)
 

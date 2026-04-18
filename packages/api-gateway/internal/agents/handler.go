@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -14,14 +15,21 @@ import (
 	"github.com/geirtellefsen1/dominos/packages/api-gateway/internal/httpx"
 )
 
+// RevokeSubjectTuples strips every FGA tuple where the given `<kind>:<id>`
+// principal is the subject. Phase 8 wires this to revoke.SubjectTuples
+// via a closure in main.go so the agents package stays off the acl ->
+// audit -> auth -> agents import cycle.
+type RevokeSubjectTuples func(ctx context.Context, principal string) (int, error)
+
 type Handler struct {
-	store *Store
-	ca    *ca.CA
-	token string
+	store        *Store
+	ca           *ca.CA
+	revokeTuples RevokeSubjectTuples
+	token        string
 }
 
-func NewHandler(store *Store, ca *ca.CA, token string) *Handler {
-	return &Handler{store: store, ca: ca, token: token}
+func NewHandler(store *Store, ca *ca.CA, revokeTuples RevokeSubjectTuples, token string) *Handler {
+	return &Handler{store: store, ca: ca, revokeTuples: revokeTuples, token: token}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -118,7 +126,26 @@ func (h *Handler) revoke(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, a)
+
+	// Phase 8: strip every FGA tuple where this agent is a subject so
+	// the next authenticated call landing here can't re-authorise on
+	// any document the agent was previously allowed to read/write.
+	removed := 0
+	if h.revokeTuples != nil {
+		n, err := h.revokeTuples(r.Context(), "agent:"+a.ID.String())
+		if err != nil {
+			slog.Error("revoke agent fga tuples", "agent", a.ID, "err", err)
+			httpx.WriteError(w, http.StatusInternalServerError, "acl_cleanup_failed",
+				"identity marked revoked but acl cleanup failed; retry the DELETE", nil)
+			return
+		}
+		removed = n
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"agent":           a,
+		"tuples_removed":  removed,
+	})
 }
 
 func (h *Handler) caCert(w http.ResponseWriter, _ *http.Request) {
