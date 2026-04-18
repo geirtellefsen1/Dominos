@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AuditEvent,
+  TriageStats,
   actorChipClass,
   decisionDot,
   gfetch,
@@ -366,7 +367,7 @@ function Stage({ cfg }: { cfg: DemoConfig }) {
         </div>
       )}
       <div className="mt-6 grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)_360px]">
-        <PaneSkeleton title="Astrid" subtitle="the AI agent" />
+        <AstridPane cfg={cfg} events={events} />
         <PaneSkeleton
           title={`${aliceLocal}'s inbox`}
           subtitle="approval queue"
@@ -374,6 +375,186 @@ function Stage({ cfg }: { cfg: DemoConfig }) {
         <AuditPane events={events} />
       </div>
     </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Astrid pane — agent identity card, triage trigger, per-agent activity,
+// and the one-revoke button. Uses live audit events (passed in from the
+// shared feed) as the activity log so the operator sees the same row
+// appear here and in the Audit pane simultaneously.
+// ---------------------------------------------------------------------------
+
+function AstridPane({ cfg, events }: { cfg: DemoConfig; events: AuditEvent[] }) {
+  const [running, setRunning] = useState(false);
+  const [revoking, setRevoking] = useState(false);
+  const [stats, setStats] = useState<TriageStats | null>(null);
+  const [revoked, setRevoked] = useState<{ tuplesRemoved: number } | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const astridActor = `agent:${cfg.astridID}`;
+  const astridEvents = useMemo(
+    () => events.filter((e) => e.actor === astridActor).slice(0, 6),
+    [events, astridActor]
+  );
+
+  const active = !revoked;
+
+  const runTriage = async () => {
+    setErr(null);
+    setRunning(true);
+    try {
+      const s = await gfetch<TriageStats>("/admin/triage/run", {
+        gateway: cfg.gateway,
+        admin: cfg.admin,
+        method: "POST",
+      });
+      setStats(s);
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const revoke = async () => {
+    if (!confirm("Revoke Astrid? This is one-way.")) return;
+    setErr(null);
+    setRevoking(true);
+    try {
+      const r = await gfetch<{ tuples_removed: number }>(
+        `/admin/agents/${cfg.astridID}`,
+        { gateway: cfg.gateway, admin: cfg.admin, method: "DELETE" }
+      );
+      setRevoked({ tuplesRemoved: r.tuples_removed });
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    } finally {
+      setRevoking(false);
+    }
+  };
+
+  return (
+    <section className="flex flex-col rounded-xl border border-neutral-800 bg-neutral-900/60">
+      <header className="flex items-center gap-3 border-b border-neutral-800 px-5 py-4">
+        <AgentAvatar active={active} running={running} />
+        <div className="flex-1">
+          <div className="text-sm font-semibold">Astrid</div>
+          <div className="text-[11px] uppercase tracking-wider text-neutral-500">
+            {revoked ? "revoked" : running ? "triaging…" : "idle"}
+          </div>
+        </div>
+        <div
+          className={
+            "rounded-full border px-2 py-0.5 text-[10px] font-medium " +
+            (revoked
+              ? "border-red-500/40 bg-red-500/10 text-red-300"
+              : "border-violet-500/40 bg-violet-500/10 text-violet-300")
+          }
+        >
+          {revoked ? "inactive" : "active"}
+        </div>
+      </header>
+
+      <div className="p-5">
+        <p className="text-xs leading-relaxed text-neutral-400">
+          AI personal assistant for{" "}
+          <span className="text-neutral-200">{cfg.aliceMail}</span>. Drafts
+          replies; never sends. Revoke with one call.
+        </p>
+
+        <div className="mt-4 space-y-2">
+          <button
+            disabled={running || !!revoked}
+            onClick={runTriage}
+            className="w-full rounded-lg bg-neutral-100 px-4 py-2 text-sm font-medium text-neutral-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {running ? "Triaging…" : "Run triage now"}
+          </button>
+          <button
+            disabled={revoking || !!revoked}
+            onClick={revoke}
+            className="w-full rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-2 text-sm font-medium text-red-300 transition hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {revoked ? "Revoked" : revoking ? "Revoking…" : "Revoke · one-way"}
+          </button>
+        </div>
+
+        {stats && (
+          <div className="mt-4 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3 text-[11px] text-neutral-400">
+            <div className="mb-1 text-neutral-500">last pass</div>
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              <span>
+                <span className="text-neutral-200">{stats.drafts_created}</span> drafted
+              </span>
+              <span>
+                <span className="text-neutral-200">{stats.emails_skipped}</span> skipped
+              </span>
+              <span>
+                <span className="text-neutral-200">{stats.emails_processed}</span> processed
+              </span>
+            </div>
+          </div>
+        )}
+
+        {revoked && (
+          <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-[11px] text-red-300">
+            <span className="text-neutral-200">{revoked.tuplesRemoved}</span> FGA
+            tuples deleted. Cert stopped authenticating on the next request.
+          </div>
+        )}
+
+        {err && (
+          <div className="mt-4 break-words rounded-lg border border-red-500/30 bg-red-500/5 p-2 font-mono text-[10px] text-red-300">
+            {err}
+          </div>
+        )}
+      </div>
+
+      <div className="border-t border-neutral-800 px-5 py-3">
+        <div className="mb-2 text-[11px] uppercase tracking-wider text-neutral-500">
+          Astrid's activity
+        </div>
+        {astridEvents.length === 0 ? (
+          <div className="py-2 text-[11px] text-neutral-600">
+            no events yet — run triage to populate
+          </div>
+        ) : (
+          <ul className="space-y-1.5">
+            {astridEvents.map((e) => (
+              <li key={e.id} className="flex items-center gap-2 text-[11px]">
+                <span className={"h-1.5 w-1.5 rounded-full " + decisionDot(e.decision)} />
+                <span className="text-neutral-300">{e.action}</span>
+                <span className="ml-auto text-neutral-600">{relTime(e.timestamp)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function AgentAvatar({ active, running }: { active: boolean; running: boolean }) {
+  return (
+    <div className="relative">
+      <div
+        className={
+          "flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold transition " +
+          (active
+            ? "bg-gradient-to-br from-violet-500 to-emerald-500 text-white"
+            : "bg-neutral-800 text-neutral-500")
+        }
+      >
+        A
+      </div>
+      {running && (
+        <span className="absolute -right-0.5 -top-0.5 h-3 w-3 animate-ping rounded-full bg-emerald-400 opacity-80" />
+      )}
+      {running && (
+        <span className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full bg-emerald-400" />
+      )}
+    </div>
   );
 }
 
