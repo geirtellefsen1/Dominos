@@ -207,6 +207,15 @@ type listObjectsResp struct {
 
 // ListObjects returns all object IDs of `objType` on which `user` has
 // `relation`. Objects come back as fully-qualified "type:id" strings.
+//
+// NOTE: OpenFGA caps the response at `listObjectsMaxResults` (default
+// 1000, tunable via OPENFGA_LIST_OBJECTS_MAX_RESULTS). There is no
+// continuation-token variant of /list-objects; for revoke-style
+// enumeration that must not miss tuples at scale, use
+// ReadAllTuplesForUser below, which pages through /read. The
+// /documents list path still uses ListObjects because 1000 visible
+// documents is well beyond MVP lists; when that limit bites we'll
+// switch to streamed-list-objects (NDJSON) or page via the DB.
 func (c *Client) ListObjects(ctx context.Context, user, relation, objType string) ([]string, error) {
 	if c.storeID == "" {
 		return nil, errors.New("fga client not bootstrapped")
@@ -223,4 +232,60 @@ func (c *Client) ListObjects(ctx context.Context, user, relation, objType string
 		return nil, err
 	}
 	return r.Objects, nil
+}
+
+// --- read (paginated tuple enumeration) ----------------------------------
+
+type readTupleKey struct {
+	User     string `json:"user,omitempty"`
+	Relation string `json:"relation,omitempty"`
+	Object   string `json:"object,omitempty"`
+}
+type readReq struct {
+	TupleKey          readTupleKey `json:"tuple_key"`
+	PageSize          int          `json:"page_size,omitempty"`
+	ContinuationToken string       `json:"continuation_token,omitempty"`
+}
+type readResp struct {
+	Tuples []struct {
+		Key readTupleKey `json:"key"`
+	} `json:"tuples"`
+	ContinuationToken string `json:"continuation_token"`
+}
+
+// ReadAllTuplesForUser pages through /stores/{id}/read and returns
+// every tuple where `user` is the subject — across ALL relations and
+// object types, not just documents. Used by the revoke path so
+// offboarding catches every tuple the principal owns, no matter how
+// many thousands it is.
+func (c *Client) ReadAllTuplesForUser(ctx context.Context, user string) ([]Tuple, error) {
+	if c.storeID == "" {
+		return nil, errors.New("fga client not bootstrapped")
+	}
+	var out []Tuple
+	var token string
+	for {
+		req := readReq{
+			TupleKey:          readTupleKey{User: user},
+			PageSize:          100,
+			ContinuationToken: token,
+		}
+		var resp readResp
+		if err := c.do(ctx, http.MethodPost,
+			fmt.Sprintf("/stores/%s/read", c.storeID), req, &resp); err != nil {
+			return nil, err
+		}
+		for _, t := range resp.Tuples {
+			out = append(out, Tuple{
+				User:     t.Key.User,
+				Relation: t.Key.Relation,
+				Object:   t.Key.Object,
+			})
+		}
+		if resp.ContinuationToken == "" {
+			break
+		}
+		token = resp.ContinuationToken
+	}
+	return out, nil
 }

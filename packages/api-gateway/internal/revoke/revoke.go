@@ -27,12 +27,21 @@ import (
 // Principal is the "<kind>:<id>" form used throughout the codebase.
 type Principal string
 
-// SubjectTuples removes every tuple where `principal` is the subject
-// across the document type's three relations (owner, reader, writer).
-// Returns (countRemoved, err).
+// SubjectTuples removes every tuple where `principal` is the subject,
+// across ANY relation and ANY object type. Returns (countRemoved, err).
 //
-// OpenFGA has no "delete all tuples for subject" call, so we enumerate
-// via ListObjects per relation and issue bulk Delete writes.
+// Before Sprint 2 #11 this used ListObjects per known relation
+// (owner/reader/writer) against the document type only, which:
+//   - silently missed any relation or object type we hadn't enumerated
+//     (forgetting a new relation = revoke coverage gap),
+//   - and truncated at FGA's listObjectsMaxResults (~1000) with no
+//     continuation-token support.
+//
+// The paginated /read endpoint solves both: it returns every tuple
+// matching {user: principal} across all relations/objects, and
+// supports a continuation_token loop. ReadAllTuplesForUser handles
+// the paging; we just batch the resulting deletes at 100 per call
+// (FGA's write cap).
 func SubjectTuples(ctx context.Context, fga *acl.Client, principal Principal) (int, error) {
 	if fga == nil {
 		return 0, errors.New("fga client not configured; cannot revoke acl tuples")
@@ -41,34 +50,23 @@ func SubjectTuples(ctx context.Context, fga *acl.Client, principal Principal) (i
 		return 0, errors.New("empty principal")
 	}
 
+	tuples, err := fga.ReadAllTuplesForUser(ctx, string(principal))
+	if err != nil {
+		return 0, fmt.Errorf("read tuples for %s: %w", string(principal), err)
+	}
+	if len(tuples) == 0 {
+		return 0, nil
+	}
 	total := 0
-	for _, rel := range []string{acl.RelOwner, acl.RelReader, acl.RelWriter} {
-		objects, err := fga.ListObjects(ctx, string(principal), rel, acl.TypeDocument)
-		if err != nil {
-			return total, fmt.Errorf("list objects (%s): %w", rel, err)
+	for i := 0; i < len(tuples); i += 100 {
+		end := i + 100
+		if end > len(tuples) {
+			end = len(tuples)
 		}
-		if len(objects) == 0 {
-			continue
+		if err := fga.Delete(ctx, tuples[i:end]...); err != nil {
+			return total, fmt.Errorf("delete batch: %w", err)
 		}
-		tuples := make([]acl.Tuple, 0, len(objects))
-		for _, obj := range objects {
-			tuples = append(tuples, acl.Tuple{
-				User:     string(principal),
-				Relation: rel,
-				Object:   obj,
-			})
-		}
-		// FGA writes are capped at 100 tuples per call; chunk to be safe.
-		for i := 0; i < len(tuples); i += 100 {
-			end := i + 100
-			if end > len(tuples) {
-				end = len(tuples)
-			}
-			if err := fga.Delete(ctx, tuples[i:end]...); err != nil {
-				return total, fmt.Errorf("delete batch (%s): %w", rel, err)
-			}
-			total += end - i
-		}
+		total += end - i
 	}
 	return total, nil
 }
