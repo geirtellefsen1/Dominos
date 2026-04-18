@@ -40,6 +40,12 @@ export default function Dashboard() {
           <h1 className="text-xl font-semibold">Dominion Admin</h1>
           <span className="text-xs text-neutral-500">governance spine — MVP</span>
         </div>
+        <p className="mt-1 text-xs text-neutral-500 max-w-2xl">
+          One console for every admin action — create AI agents, grant or
+          revoke access, inspect the signed audit log, approve or reject
+          drafts, and one-revoke a compromised identity. Fill in the three
+          fields below once per browser; they stay in <code>localStorage</code>.
+        </p>
         <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
           <label className="flex flex-col">
             <span className="text-xs text-neutral-500">Gateway URL</span>
@@ -49,6 +55,10 @@ export default function Dashboard() {
               onChange={(e) => setGateway(e.target.value)}
               placeholder="http://localhost:3000"
             />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              Where the Dominion API lives. On a droplet it's
+              <code className="ml-1">http://&lt;ip&gt;:3000</code>.
+            </span>
           </label>
           <label className="flex flex-col">
             <span className="text-xs text-neutral-500">Admin bearer token</span>
@@ -58,16 +68,22 @@ export default function Dashboard() {
               value={adminToken}
               onChange={(e) => setAdminToken(e.target.value)}
             />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              From <code>infra/.env</code> as
+              <code className="mx-1">DOMINION_ADMIN_TOKEN</code>.
+              Unlocks every <code>/admin/*</code> route below.
+            </span>
           </label>
           <label className="flex flex-col">
             <span className="text-xs text-neutral-500">
-              View-as principal (user:&lt;uuid&gt; / agent:&lt;uuid&gt;)
+              View-as principal
             </span>
             <div className="flex gap-2">
               <input
                 className="border rounded px-2 py-1 bg-transparent font-mono flex-1"
                 value={devPrincipal}
                 onChange={(e) => setDevPrincipal(e.target.value)}
+                placeholder="user:<uuid>  or  agent:<uuid>"
               />
               <button
                 onClick={saveConfig}
@@ -76,6 +92,12 @@ export default function Dashboard() {
                 save
               </button>
             </div>
+            <span className="text-[11px] text-neutral-500 mt-1">
+              Lets you act as a user or agent on <code>/me/*</code> routes
+              (Queue tab). Leave blank in admin tabs. Requires
+              <code className="mx-1">DOMINION_DEV_PRINCIPAL_HEADER=true</code>
+              on the gateway.
+            </span>
           </label>
         </div>
         <nav className="mt-4 flex gap-4 overflow-x-auto text-sm">
@@ -121,11 +143,52 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
+// Err renders an error message from the gateway plus a short,
+// user-friendly hint for the common failure codes. The raw message
+// still shows up so an operator can copy-paste it into a bug report.
 function Err({ msg }: { msg: string | null }) {
   if (!msg) return null;
+  const hint = hintFor(msg);
   return (
-    <p className="text-sm text-red-600 dark:text-red-400 whitespace-pre-wrap">{msg}</p>
+    <div className="mt-2 text-sm">
+      <p className="text-red-600 dark:text-red-400 whitespace-pre-wrap font-mono text-xs">
+        {msg}
+      </p>
+      {hint && (
+        <p className="mt-1 text-neutral-600 dark:text-neutral-400 text-xs">
+          {hint}
+        </p>
+      )}
+    </div>
   );
+}
+
+function hintFor(msg: string): string | null {
+  if (/\b401\b/.test(msg) && /admin/i.test(msg)) {
+    return "The admin bearer token is missing or wrong. Paste a valid DOMINION_ADMIN_TOKEN at the top and click save.";
+  }
+  if (/\b401\b/.test(msg) || /unauthorized/i.test(msg)) {
+    return "Not authenticated. For /me/* routes, set a View-as principal at the top (user:<uuid> or agent:<uuid>) and click save.";
+  }
+  if (/\b403\b/.test(msg) || /forbidden/i.test(msg)) {
+    return "The principal has no tuple for this action. Grant it in the ACL tab, or switch View-as to someone with access.";
+  }
+  if (/\b404\b/.test(msg) || /not_found/i.test(msg)) {
+    return "The resource doesn't exist, or has been soft-deleted. Double-check the uuid.";
+  }
+  if (/\b409\b/.test(msg) || /not_pending/i.test(msg)) {
+    return "The draft is already sent or rejected; nothing to do.";
+  }
+  if (/schema_violation/i.test(msg)) {
+    return "The document body didn't match its schema. Check the details[] field for the exact path + message.";
+  }
+  if (/admin_disabled/i.test(msg)) {
+    return "DOMINION_ADMIN_TOKEN isn't configured on the gateway. Set it in infra/.env and redeploy.";
+  }
+  if (/cors/i.test(msg) || /failed to fetch/i.test(msg) || /network/i.test(msg)) {
+    return "Browser blocked the request. Make sure DOMINION_CORS_ORIGIN on the gateway matches the URL in your address bar exactly (trailing slash, http vs https).";
+  }
+  return null;
 }
 
 function Btn(
@@ -193,7 +256,21 @@ function AgentsTab() {
 
   return (
     <>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4 max-w-3xl">
+        AI agents are first-class identities in Dominion — each one gets an
+        X.509 certificate signed by the internal CA and its own ACL
+        footprint. A user's <i>personal assistant</i> is just an agent
+        whose <code>owner_user_id</code> points to that user; the triage
+        engine then auto-grants the PA reader access to incoming email.
+      </p>
+
       <Card title="Create AI agent">
+        <p className="text-xs text-neutral-500 mb-3">
+          Issues a new cert + private key. The private key is returned
+          <b> once</b>; copy it to the machine that will run the agent.
+          Leaks the private key and anyone can impersonate the agent
+          until you revoke it.
+        </p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
           <label className="flex flex-col">
             <span className="text-xs text-neutral-500">Display name</span>
@@ -202,6 +279,9 @@ function AgentsTab() {
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
             />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              Human-friendly label for audit reports, e.g. "Astrid".
+            </span>
           </label>
           <label className="flex flex-col md:col-span-2">
             <span className="text-xs text-neutral-500">Owner user id (optional)</span>
@@ -211,26 +291,41 @@ function AgentsTab() {
               onChange={(e) => setOwnerUserId(e.target.value)}
               placeholder="uuid"
             />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              When set, this agent becomes the user's PA and receives
+              reader access on every email ingested into their mailbox.
+              Leave blank for a firm-level or specialist agent.
+            </span>
           </label>
         </div>
         <div className="mt-3">
-          <Btn onClick={create}>create agent</Btn>
+          <Btn onClick={create}>create agent · issue cert (one-time reveal)</Btn>
         </div>
         <Err msg={err} />
       </Card>
 
       {issued && (
         <Card title="Result">
+          <p className="text-xs text-neutral-500 mb-2">
+            <b>Save <code>cert_pem</code> and <code>private_key_pem</code> now</b>
+            {" — "}the gateway never stores the private key. Also save
+            <code className="mx-1">ca_cert_pem</code>: the agent uses it
+            to verify the gateway's TLS cert on <code>:3443</code>.
+          </p>
           <pre className="text-xs overflow-auto p-2 bg-neutral-50 dark:bg-neutral-950 rounded max-h-[400px]">
             {JSON.stringify(issued, null, 2)}
           </pre>
-          <p className="text-xs text-neutral-500 mt-2">
-            Save cert_pem and private_key_pem now — the gateway does not store the private key.
-          </p>
         </Card>
       )}
 
       <Card title="Revoke agent (one-revoke)">
+        <p className="text-xs text-neutral-500 mb-3">
+          Three atomic effects: (1) the agent row flips to
+          <code className="mx-1">active=false</code>, (2) its cert stops
+          authenticating on the next request, (3) every FGA tuple where
+          this agent is the subject is deleted. One-way; issue a new
+          agent to replace it.
+        </p>
         <div className="flex gap-2 items-end">
           <label className="flex-1 flex flex-col text-sm">
             <span className="text-xs text-neutral-500">Agent id</span>
@@ -238,11 +333,11 @@ function AgentsTab() {
               className="border rounded px-2 py-1 bg-transparent font-mono"
               value={revokeId}
               onChange={(e) => setRevokeId(e.target.value)}
-              placeholder="uuid"
+              placeholder="uuid (from the create result above, or from the Audit tab)"
             />
           </label>
           <Btn variant="danger" onClick={revoke} disabled={!revokeId}>
-            revoke
+            revoke · one-way
           </Btn>
         </div>
       </Card>
@@ -284,7 +379,21 @@ function UsersTab() {
 
   return (
     <>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4 max-w-3xl">
+        Humans in Dominion are provisioned via Entra ID SCIM and identified
+        by their email. This tab looks them up by email and performs the
+        one-revoke offboarding primitive — the same three-step atomic
+        effect as agent revoke, plus a session kill for active browser
+        logins.
+      </p>
+
       <Card title="Look up user (SCIM)">
+        <p className="text-xs text-neutral-500 mb-3">
+          Reads from the SCIM v2 <code>/Users</code> endpoint with
+          <code className="mx-1">userName eq "..."</code> filter.
+          Returns the user's id (paste into the revoke box below) and
+          their active flag.
+        </p>
         <div className="flex gap-2 items-end">
           <label className="flex-1 flex flex-col text-sm">
             <span className="text-xs text-neutral-500">userName (email)</span>
@@ -292,15 +401,16 @@ function UsersTab() {
               className="border rounded px-2 py-1 bg-transparent"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              placeholder="alice@example.com"
             />
           </label>
-          <Btn onClick={find}>find</Btn>
+          <Btn onClick={find}>find · SCIM lookup</Btn>
         </div>
         <Err msg={err} />
       </Card>
 
       {users.length > 0 && (
-        <Card title="Results">
+        <Card title={`${users.length} match${users.length === 1 ? "" : "es"}`}>
           <table className="w-full text-sm">
             <thead className="text-xs text-neutral-500">
               <tr>
@@ -314,7 +424,9 @@ function UsersTab() {
                 <tr key={u.id} className="border-t border-neutral-200 dark:border-neutral-800">
                   <td className="p-1 font-mono text-xs">{u.id}</td>
                   <td className="p-1">{u.userName}</td>
-                  <td className="p-1">{String(u.active)}</td>
+                  <td className={"p-1 " + (u.active ? "" : "text-red-600")}>
+                    {String(u.active)}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -323,8 +435,13 @@ function UsersTab() {
       )}
 
       <Card title="Revoke user (one-revoke)">
-        <p className="text-xs text-neutral-500 mb-2">
-          Deactivates the row, revokes all sessions, strips every FGA tuple where this user is the subject.
+        <p className="text-xs text-neutral-500 mb-3">
+          Four atomic effects: (1) user row flips to
+          <code className="mx-1">active=false</code>, (2) every active
+          session is terminated, (3) every FGA tuple where this user is
+          the subject is deleted, (4) next SCIM request for this user
+          surfaces the inactive state to the upstream IdP. One-way;
+          re-provisioning requires a new SCIM POST.
         </p>
         <div className="flex gap-2 items-end">
           <label className="flex-1 flex flex-col text-sm">
@@ -333,10 +450,11 @@ function UsersTab() {
               className="border rounded px-2 py-1 bg-transparent font-mono"
               value={revokeId}
               onChange={(e) => setRevokeId(e.target.value)}
+              placeholder="uuid (copy from the find results above)"
             />
           </label>
           <Btn variant="danger" onClick={revoke} disabled={!revokeId}>
-            revoke
+            revoke · one-way
           </Btn>
         </div>
       </Card>
@@ -367,50 +485,74 @@ function ACLTab() {
   };
 
   return (
-    <Card title="Grant / revoke ACL tuple">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-        <label className="flex flex-col">
-          <span className="text-xs text-neutral-500">Principal</span>
-          <input
-            className="border rounded px-2 py-1 bg-transparent font-mono"
-            value={principal}
-            onChange={(e) => setPrincipal(e.target.value)}
-          />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-xs text-neutral-500">Relation</span>
-          <select
-            className="border rounded px-2 py-1 bg-transparent"
-            value={relation}
-            onChange={(e) => setRelation(e.target.value as any)}
-          >
-            <option value="reader">reader</option>
-            <option value="writer">writer</option>
-            <option value="owner">owner</option>
-          </select>
-        </label>
-        <label className="flex flex-col">
-          <span className="text-xs text-neutral-500">Resource</span>
-          <input
-            className="border rounded px-2 py-1 bg-transparent font-mono"
-            value={resource}
-            onChange={(e) => setResource(e.target.value)}
-          />
-        </label>
-      </div>
-      <div className="flex gap-2 mt-3">
-        <Btn onClick={() => write("grant")}>grant</Btn>
-        <Btn variant="danger" onClick={() => write("revoke")}>
-          revoke
-        </Btn>
-      </div>
-      <Err msg={err} />
-      {status && (
-        <pre className="mt-3 text-xs p-2 bg-neutral-50 dark:bg-neutral-950 rounded">
-          {JSON.stringify(status, null, 2)}
-        </pre>
-      )}
-    </Card>
+    <>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4 max-w-3xl">
+        Dominion's ACL is Zanzibar-style relationship tuples in OpenFGA.
+        Every tuple is a three-part statement:
+        <b className="mx-1">principal</b> has <b>relation</b> on
+        <b className="mx-1">resource</b>. Granting a tuple gives the
+        principal access; revoking removes it. The triage engine and
+        email ingester write owner/reader tuples automatically; use this
+        tab for manual adjustments or ad-hoc sharing.
+      </p>
+      <Card title="Grant / revoke ACL tuple">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          <label className="flex flex-col">
+            <span className="text-xs text-neutral-500">Principal</span>
+            <input
+              className="border rounded px-2 py-1 bg-transparent font-mono"
+              value={principal}
+              onChange={(e) => setPrincipal(e.target.value)}
+              placeholder="user:<uuid>  or  agent:<uuid>"
+            />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              Who gets the relation. Type prefix is required.
+            </span>
+          </label>
+          <label className="flex flex-col">
+            <span className="text-xs text-neutral-500">Relation</span>
+            <select
+              className="border rounded px-2 py-1 bg-transparent"
+              value={relation}
+              onChange={(e) => setRelation(e.target.value as any)}
+            >
+              <option value="reader">reader</option>
+              <option value="writer">writer</option>
+              <option value="owner">owner</option>
+            </select>
+            <span className="text-[11px] text-neutral-500 mt-1">
+              <b>reader</b> = GET · <b>writer</b> = PATCH/approve ·
+              <b className="ml-1">owner</b> = writer + transfer.
+            </span>
+          </label>
+          <label className="flex flex-col">
+            <span className="text-xs text-neutral-500">Resource</span>
+            <input
+              className="border rounded px-2 py-1 bg-transparent font-mono"
+              value={resource}
+              onChange={(e) => setResource(e.target.value)}
+              placeholder="document:<uuid>"
+            />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              What the relation is on. MVP supports
+              <code className="mx-1">document:&lt;uuid&gt;</code>.
+            </span>
+          </label>
+        </div>
+        <div className="flex gap-2 mt-3">
+          <Btn onClick={() => write("grant")}>grant · writes tuple</Btn>
+          <Btn variant="danger" onClick={() => write("revoke")}>
+            revoke · deletes tuple
+          </Btn>
+        </div>
+        <Err msg={err} />
+        {status && (
+          <pre className="mt-3 text-xs p-2 bg-neutral-50 dark:bg-neutral-950 rounded">
+            {JSON.stringify(status, null, 2)}
+          </pre>
+        )}
+      </Card>
+    </>
   );
 }
 
@@ -444,41 +586,78 @@ function AuditTab() {
 
   return (
     <>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4 max-w-3xl">
+        Every request through the gateway is recorded in an append-only,
+        per-entry Ed25519-signed log. Export a filtered slice here; the
+        bundle includes the current public key inline, so a compliance
+        officer can verify every signature offline.
+      </p>
+
       <Card title="Audit export">
+        <p className="text-xs text-neutral-500 mb-3">
+          All filters are optional. The default <i>from</i> is 5 minutes
+          ago. Capped at 1000 entries per export — narrow the time range
+          or filter by actor if you hit the cap.
+        </p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
           <label className="flex flex-col">
-            <span className="text-xs text-neutral-500">actor (e.g. agent:uuid)</span>
+            <span className="text-xs text-neutral-500">actor</span>
             <input
               className="border rounded px-2 py-1 bg-transparent font-mono"
               value={actor}
               onChange={(e) => setActor(e.target.value)}
+              placeholder="agent:<uuid>  or  user:<uuid>"
             />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              Exact match. Leave blank for every actor.
+            </span>
           </label>
           <label className="flex flex-col">
-            <span className="text-xs text-neutral-500">from (RFC3339)</span>
+            <span className="text-xs text-neutral-500">from</span>
             <input
               className="border rounded px-2 py-1 bg-transparent font-mono"
               value={from}
               onChange={(e) => setFrom(e.target.value)}
+              placeholder="2026-04-18T00:00:00Z"
             />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              RFC3339 UTC timestamp. Inclusive.
+            </span>
           </label>
           <label className="flex flex-col">
-            <span className="text-xs text-neutral-500">to (RFC3339, optional)</span>
+            <span className="text-xs text-neutral-500">to (optional)</span>
             <input
               className="border rounded px-2 py-1 bg-transparent font-mono"
               value={to}
               onChange={(e) => setTo(e.target.value)}
+              placeholder="blank = now"
             />
+            <span className="text-[11px] text-neutral-500 mt-1">
+              RFC3339 UTC. Exclusive.
+            </span>
           </label>
         </div>
         <div className="mt-3">
-          <Btn onClick={fetchBundle}>export</Btn>
+          <Btn onClick={fetchBundle}>export · signed JSON bundle</Btn>
         </div>
         <Err msg={err} />
       </Card>
 
-      {bundle && (
-        <Card title={`${bundle.count} entries (key_id ${bundle.key_id})`}>
+      {bundle && bundle.count === 0 && (
+        <Card title="Empty result">
+          <p className="text-xs text-neutral-500">
+            No events matched. Widen the time range, clear the actor
+            filter, or run a request through the gateway (e.g. the
+            Triage tab) and try again.
+          </p>
+        </Card>
+      )}
+
+      {bundle && bundle.count > 0 && (
+        <Card title={`${bundle.count} entries · key_id ${bundle.key_id}`}>
+          <p className="text-xs text-neutral-500 mb-3">
+            <b>allow</b> = request succeeded · <b>deny</b> = 401 / 403 · <b>error</b> = 5xx / malformed.
+          </p>
           <div className="max-h-[480px] overflow-auto">
             <table className="w-full text-xs">
               <thead className="text-neutral-500 sticky top-0 bg-white dark:bg-neutral-900">
@@ -553,14 +732,34 @@ function QueueTab() {
 
   return (
     <>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4 max-w-3xl">
+        The approval queue is the governance checkpoint for every email
+        an agent drafts. The agent creates the draft autonomously; a
+        human must approve before Microsoft Graph receives the send.
+        This tab is user-scoped — set <i>View-as principal</i> at the
+        top to <code>user:&lt;uuid&gt;</code> to see that user's queue.
+      </p>
+
       <Card title="Approval queue (view-as principal)">
         <p className="text-xs text-neutral-500 mb-3">
-          Lists <code>draft.v1</code> documents where status=pending that the configured
-          view-as principal can read.
+          Lists <code>draft.v1</code> documents in
+          <code className="mx-1">status=pending</code> that the configured
+          view-as principal can read. Needs the view-as field set at the
+          top; otherwise every request is unauthenticated.
         </p>
-        <Btn onClick={refresh}>refresh</Btn>
+        <Btn onClick={refresh}>refresh · fetches current pending drafts</Btn>
         <Err msg={err} />
       </Card>
+
+      {items.length === 0 && !err && (
+        <Card title="Queue is empty">
+          <p className="text-xs text-neutral-500">
+            Either the view-as principal has no drafts yet, or they were
+            all approved / rejected. Trigger a pass in the
+            <b className="mx-1">Triage</b> tab to create new ones.
+          </p>
+        </Card>
+      )}
 
       {items.map((d) => {
         let body: any = {};
@@ -573,13 +772,18 @@ function QueueTab() {
           <Card key={d.id} title={`${body.subject || "(no subject)"} — ${d.id}`}>
             <p className="text-xs text-neutral-500">
               To {(body.to || []).join(", ")} · generated by{" "}
-              <span className="font-mono">{body.generatedByAgent}</span> at {body.generatedAt}
+              <span className="font-mono">{body.generatedByAgent}</span>{" "}
+              at {body.generatedAt}
             </p>
-            <pre className="my-3 whitespace-pre-wrap text-sm">{body.body}</pre>
+            <pre className="my-3 whitespace-pre-wrap text-sm bg-neutral-50 dark:bg-neutral-950 p-3 rounded">
+              {body.body}
+            </pre>
             <div className="flex gap-2">
-              <Btn onClick={() => act(d.id, "approve")}>approve &amp; send</Btn>
+              <Btn onClick={() => act(d.id, "approve")}>
+                approve · send via Microsoft Graph
+              </Btn>
               <Btn variant="ghost" onClick={() => act(d.id, "reject")}>
-                reject
+                reject · mark rejected, no send
               </Btn>
             </div>
           </Card>
@@ -617,18 +821,31 @@ function TriageTab() {
   };
 
   return (
-    <Card title="Trigger triage pass">
-      <p className="text-xs text-neutral-500 mb-3">
-        Runs one triage pass across every active PA. The background scheduler runs the
-        same logic on <code>DOMINION_TRIAGE_INTERVAL</code> (default 5m).
+    <>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4 max-w-3xl">
+        Triage is the scheduled job that turns ingested email into draft
+        replies. For every active PA, it scans the owner's recent
+        <code className="mx-1">email.v1</code> documents and asks Claude
+        whether each one deserves a draft. The background scheduler runs
+        on <code>DOMINION_TRIAGE_INTERVAL</code> (default 5m); this button
+        forces an immediate pass.
       </p>
-      <Btn onClick={run}>run now</Btn>
-      <Err msg={err} />
-      {stats && (
-        <pre className="mt-3 text-xs p-2 bg-neutral-50 dark:bg-neutral-950 rounded">
-          {JSON.stringify(stats, null, 2)}
-        </pre>
-      )}
-    </Card>
+      <Card title="Trigger triage pass">
+        <p className="text-xs text-neutral-500 mb-3">
+          Idempotent — emails that already have a draft from the same PA
+          are skipped. Returns a stats object you can paste into the
+          Audit tab's <i>actor</i> filter as
+          <code className="mx-1">agent:&lt;uuid&gt;</code> to see what
+          each agent did.
+        </p>
+        <Btn onClick={run}>run triage now · creates drafts for untriaged email</Btn>
+        <Err msg={err} />
+        {stats && (
+          <pre className="mt-3 text-xs p-2 bg-neutral-50 dark:bg-neutral-950 rounded">
+            {JSON.stringify(stats, null, 2)}
+          </pre>
+        )}
+      </Card>
+    </>
   );
 }
